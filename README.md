@@ -37,12 +37,16 @@
 │
 ├── MODDING-REPORT.md      ★ 全文分析：架构、20+ 条带 file:line 的缺陷、扩展点、21 项路线图
 │
-├── mods/                  ★ 三个补丁 + 原始基线，可直接 review / git apply
-│   ├── 01-runtime-occlusion.patch      background.ts：运行时自绘遮蔽层
-│   ├── 02-occlusion-tests.patch        background.spec.ts：+4 个测试，查找方式改为按属性
-│   ├── 03-backdrop-media-policy.patch  decoration-layers.ts：视频背景生命周期 + 无障碍
+├── mods/                  ★ 六个补丁 + 原始基线，可直接 review / git apply
+│   ├── 01-runtime-occlusion.patch       background.ts：运行时自绘遮蔽层
+│   ├── 02-occlusion-tests.patch         background.spec.ts：+4 个测试，查找方式改为按属性
+│   ├── 03-backdrop-media-policy.patch   decoration-layers.ts：视频背景生命周期 + 无障碍
+│   ├── 04-legacy-bridge-before-seed.patch  index.ts：修 v1 升级静默丢皮肤
+│   ├── 05-skin-id-single-pattern.patch  id 正则统一（校验器 + 注入器 + 2 个 spec）
+│   ├── 06-stylesheet-link-leak.patch    skin-controller.ts：修 <head> 无界增长
 │   ├── baseline/          未改动的上游原文（review 用）
 │   └── patched/           改后文件（对照用）
+│
 │
 ├── skins/                 ★ 两款原创 v2 皮肤
 │   ├── cyber-maiden/      女仆少女 · 冷钢之夜（13.57s 循环，1.03 MiB）
@@ -64,7 +68,7 @@
 
 ---
 
-## 两个改动
+## 两处改动 + 三个缺陷修复
 
 ### 01 · 让遮蔽真正生效
 
@@ -87,9 +91,37 @@
 > 契约明确要求「帧循环与无限动画必须在隐藏时暂停」，而 WE 壁纸那条路径实现了
 > （`client/wallpaper.ts`）、**背景视频没有** —— 同一产品两套标准。
 
-**两个改动都不涉及契约变更**：没有新增/删除 skin manifest 字段（v2 schema 是
+**三个改动都不涉及契约变更**：没有新增/删除 skin manifest 字段（v2 schema 是
 `additionalProperties: false`，加字段就是契约变更），没有重命名任何已持久化的标识符、
 线协议字段或 profile 格式，不破坏任何现有皮肤。
+
+### 04 · v1 升级不再静默丢皮肤
+
+插件原来**先**执行「默认皮肤种子」、**后**执行 v1→v2 legacy bridge。bridge 看到 v2 里已经
+有选择了就跳过 id 迁移，**却仍然把旧段删掉** —— 所以 v1 老用户升级后，自己选的皮肤被
+无声替换成 `blue-fantasy`，任何地方都没有报错（而种子上方的注释还宣称行为正好相反）。
+改成先迁移、后种子。
+
+### 05 · skin id 只有一份正则
+
+校验器接受 `^[a-z][a-z0-9-]{0,31}$`（所以 `a-`、`x--y` 合法），注入器要求 kebab-case 并对
+这些 id 抛异常。异常被 bootstrap 吞掉并降级成 stock look —— **这种皮肤能装、但永远不渲染**。
+改成一份导出的 `SKIN_ID_PATTERN`，两边共用；kebab-case 是本项目脚手架本来的形状，所以
+收紧的是校验器。收紧前核对过：**53 个已发布 id 全部同时满足两个正则**。
+
+### 06 · 修 `<head>` 无界增长
+
+`trackStylesheet` 记录拆卸时是**按 href 反查**元素的，而服务端为首屏预渲染了一个同 href 的
+link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏自己刚创建的那个**：每次切皮肤
+`<head>` 多出最多两个 link，每个都是一次额外的样式重算，且终生不回收。改成由 loader 返回
+自己创建的元素、按节点身份拆卸。
+
+> **这里我要修正自己报告里的一处错误结论。** 报告曾说泄漏的 `patches` link 会在别的皮肤下
+> 「继续上色」。**这是错的**：`transformSkinCss` 对 `skin.css` 和 `patches.css` 的每个选择器
+> 都强制加了作用域，所以 `html[data-dsh-skin]` 一翻转，旧 link 的规则就完全失效。真实代价是
+> **`<head>` 无界增长 + 样式重算开销**，新测试钉的是「有界」（而不是「清空」——那个预渲染的
+> link 不属于任何一次激活，它本来就该留下）。
+
 
 ---
 
@@ -100,15 +132,15 @@
 | 门禁 | 命令 | 结果 |
 |---|---|---|
 | 类型 | `pnpm typecheck` | **0 错误** |
-| 测试 | `pnpm test` | **628 通过 / 15 失败** |
-| 构建 | `pnpm build` | **成功**，`lib/index.js` 354 KB + `lib/client.js` 294 KB，改动标记均在产物中 |
+| 测试 | `pnpm test` | **631 通过 / 15 失败** |
+| 构建 | `pnpm build` | **成功**，`lib/index.js` + `lib/client.js`，改动标记均在产物中 |
 
 **零回归是跑对照实验得出的**（在完全相同的 `skins/` 状态下）：
 
 | | 测试总数 | 失败 | 通过 |
 |---|---|---|---|
 | 原始上游代码 | 639 | **15** | 624 |
-| 本仓库的补丁 | 643 | **15** | **628** |
+| 本仓库的补丁 | 646 | **15** | **631** |
 
 失败集合完全一致。那 15 个**全部**是 `ENOENT` / `Cannot find module` 指向仓库里的
 **市场皮肤测试夹具**（`matrix` / `maid-atelier` / `orca-link` / `whale-mom` /
@@ -116,7 +148,10 @@
 `porco-rosso` / `white-snake`）—— 这些皮肤**本来就不在 npm 包里**（`files` 白名单只含
 `skins/blue-fantasy`）。全量 **0 个 AssertionError / TypeError / ReferenceError**。
 
-**补丁可复现性**：三个补丁 `patch -p1` 打到原始文件上，结果与 `mods/patched/` **逐字节一致**。
+我新增的 7 个测试全部通过；其中 **3 个被单独验证过「有牙」**——把对应的源码修复临时回退，
+测试立即失败，恢复后再次通过。
+
+**补丁可复现性**：六个补丁 `patch -p1` 打到原始文件上，10 个文件与 `mods/patched/` **逐字节一致**。
 
 ---
 
@@ -223,21 +258,37 @@ and the repository's own performance contract R3 *requires* it), honour
 `prefers-reduced-motion` by holding one frame, `preload="metadata"`, an explicit
 teardown, and a stable hook attribute.
 
+Beyond those two fixes, three defects from the survey are repaired in the same
+series: the default-skin seed ran before the legacy v1→v2 bridge and silently
+lost an upgrading user's chosen skin; the manifest validator and the index
+injector disagreed about which skin ids are legal, so an id like `a-` installed
+and then never rendered; and `trackStylesheet` looked its own `<link>` up by href
+while the server pre-renders one with the same href, leaking up to two links into
+`<head>` per switch for the life of the page.
+
 **Verification** — all three upstream gates were run in the upstream tree:
-`pnpm typecheck` 0 errors; `pnpm test` 628 passed / 15 failed with a **controlled
+`pnpm typecheck` 0 errors; `pnpm test` 631 passed / 15 failed with a **controlled
 experiment proving zero regressions** (pristine upstream: 15 failed / 624 passed;
-this fork: 15 failed / 628 passed — same failure set, every remaining failure a
+this fork: 15 failed / 631 passed — same failure set, every remaining failure a
 missing market-skin test fixture that is not part of the npm package);
 `pnpm build` succeeds with the changes present in the bundle. The patches apply
-cleanly to pristine upstream and reproduce `mods/patched/` byte-for-byte.
+cleanly to pristine upstream and reproduce `mods/patched/` byte-for-byte across
+ten files, and three of the seven added tests were individually shown to fail
+when their source fix is reverted.
 
-Neither change alters the skin manifest schema (which is
+No change alters the skin manifest schema (which is
 `additionalProperties: false`, so a new field *would* be a contract change),
 renames a persisted identifier, or breaks an existing skin.
 
+**A correction.** The survey claimed a leaked `patches` link could keep painting
+under another skin. That is wrong — the loader force-scopes every selector in
+both stylesheets, so a stale link is inert once the skin attribute flips. The real
+cost is unbounded `<head>` growth. The report and `mods/README.md` carry the
+correction.
+
 See [`MODDING-REPORT.md`](MODDING-REPORT.md) for the full analysis: architecture,
 20+ evidenced defects across correctness/performance/security, the extension-point
-inventory, and a 21-item prioritised roadmap.
+inventory, and a prioritised roadmap with the remaining items.
 
 Licensing and the upstream's own **license discrepancy** (`LICENSE` file is
 BSD 3-Clause while `package.json` claims Apache-2.0) are documented in

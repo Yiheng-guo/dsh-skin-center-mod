@@ -1,0 +1,116 @@
+--- baseline/src/core/manifest-v2/validate.ts	2026-10-01 03:23:47
++++ patched/src/core/manifest-v2/validate.ts	2026-10-01 03:23:47
+@@ -19,7 +19,21 @@
+ import type { SkinManifestV2, SkinManifestValidation } from './types.ts'
+ 
+ const REL_PATH = /^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$))(?!.*:\/\/)[A-Za-z0-9._\-/]+$/
+-const SKIN_ID = /^[a-z][a-z0-9-]{0,31}$/
++/**
++ * Canonical skin id shape: kebab-case, at most 32 characters.
++ *
++ * This used to be two different patterns. The validator accepted
++ * `^[a-z][a-z0-9-]{0,31}$` (so `a-` and `x--y` were valid) while the index
++ * injector required kebab-case and threw on them — a skin with such an id
++ * validated, installed, and then silently fell back to the stock look on every
++ * page load, because that throw is caught and degrades to no skin. Kebab-case
++ * is the shape this project's own scaffolding produces, so the gate moves to
++ * match it: a bad id now fails validation with a readable error instead of
++ * failing invisibly at render time. All 53 published skin ids satisfy both the
++ * injector pattern and this one.
++ */
++export const SKIN_ID_PATTERN = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
++const SKIN_ID = SKIN_ID_PATTERN
+ const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+ const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
+ const API_VERSION = /^x-org\.linxin666\.skin-center\/[a-z0-9]+$/
+--- baseline/src/tap-index-adapter.ts	2026-10-01 03:23:47
++++ patched/src/tap-index-adapter.ts	2026-10-01 03:23:47
+@@ -12,6 +12,7 @@
+  */
+ 
+ import type { IndexInjection } from '@deepseek-ai/dsh-host-webserver'
++import { SKIN_ID_PATTERN } from './core/manifest-v2/validate.ts'
+ import { findSkin, loadSkinCatalog } from './skin-repo.ts'
+ import type { SkinCatalog } from './skin-repo.ts'
+ import { SKIN_CENTER_V2_PREFIX } from './routes-v2.ts'
+@@ -25,7 +26,10 @@
+ 
+ const HTML_TAG = /<html(\s[^>]*)?>/i
+ const HEAD_CLOSE = /<\/head>/i
+-const SKIN_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
++// One pattern, shared with the manifest validator: this module used to carry a
++// second, stricter copy, so the validator and the injector disagreed about which
++// ids were legal (see SKIN_ID_PATTERN).
++const SKIN_ID = SKIN_ID_PATTERN
+ 
+ /** Stamp or replace data-dsh-skin on the <html> tag. */
+ export function stampSkinAttribute(html: string, skinId: string): string {
+--- baseline/tests/manifest-v2.spec.ts	2026-10-01 03:23:48
++++ patched/tests/manifest-v2.spec.ts	2026-10-01 03:23:48
+@@ -163,6 +163,19 @@
+     }
+   })
+ 
++  it('rejects the ids the index injector would throw on (the gate and the injector agree)', () => {
++    // These used to pass this validator and then make skinLinkTags throw. The
++    // bootstrap catches that and degrades to the stock look, so the skin
++    // installed fine and never rendered, with no error the user could see.
++    for (const id of ['a-', '-a', 'x--y', 'a'.repeat(33)]) {
++      expect(validateSkinManifestV2({ ...validV2, id }).ok).toBe(false)
++    }
++    // The shapes that must keep working, including every published skin id.
++    for (const id of ['a', 'harbor', 'blue-fantasy', 'cyber-maiden', 'x1-y2', 'a'.repeat(32)]) {
++      expect(validateSkinManifestV2({ ...validV2, id }).ok).toBe(true)
++    }
++  })
++
+   it('keeps legacy v1 manifests on the deprecated allowlist (never unknown-field)', () => {
+     // The shape every retired v1 skin.json shared: v1-only fields
+     // (package / wiring / bodyAttr) and no v2 structure at all.
+--- baseline/tests/tap-index-adapter.spec.ts	2026-10-01 03:23:49
++++ patched/tests/tap-index-adapter.spec.ts	2026-10-01 03:23:49
+@@ -5,6 +5,7 @@
+ import { describe, expect, it } from 'vitest'
+ 
+ import { makeSkinIndexRows, makeSkinIndexTap, skinLinkTags, stampSkinAttribute } from '../src/tap-index-adapter.ts'
++import { validateSkinManifestV2 } from '../src/core/manifest-v2/validate.ts'
+ import type { SkinCatalog } from '../src/skin-repo.ts'
+ 
+ const HTML = '<!doctype html><html lang="zh-CN"><head><title>dsh</title></head><body><div id="root"></div></body></html>'
+@@ -66,6 +67,36 @@
+   it('rejects an invalid id before it reaches raw HTML', () => {
+     expect(() => skinLinkTags('bad\" onload=\"alert(1)', false)).toThrow('invalid skin id')
+   })
++
++  it('agrees with the manifest validator about which ids are legal', () => {
++    // An anti-duplication guard, not a shape pin: both modules now read one
++    // exported constant, so this passes by construction today and fails the
++    // moment a local pattern is re-introduced here. The shape itself is pinned
++    // by the validator's own spec. The bug being guarded against was exactly
++    // this duplication: the validator admitted `a-` and `x--y`, this module
++    // threw on them, and the bootstrap turned that throw into a permanent stock
++    // look — a skin that installs and never renders.
++    const minimal = {
++      skinManifestVersion: 2,
++      id: 'harbor',
++      name: 'x',
++      nameEn: 'x',
++      version: '1.0.0',
++      author: 'x',
++      contributes: { stylesheet: 'skin.css' },
++    }
++    const ids = ['a', 'harbor', 'blue-fantasy', 'x1-y2', 'a-', '-a', 'x--y', 'A', 'a b', 'a/b', 'a'.repeat(32), 'a'.repeat(33)]
++    for (const id of ids) {
++      const accepted = validateSkinManifestV2({ ...minimal, id }).ok
++      let injectorOk = true
++      try {
++        skinLinkTags(id, false)
++      } catch {
++        injectorOk = false
++      }
++      expect(`${id}:${accepted}`).toBe(`${id}:${injectorOk}`)
++    }
++  })
+ })
+ 
+ describe('makeSkinIndexRows', () => {

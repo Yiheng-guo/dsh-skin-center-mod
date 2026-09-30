@@ -61,13 +61,15 @@
 
 ### B. 正确性
 
-**B1 · 样式表 `<link>` 泄漏 → 跨皮肤污染（最该先修）**
-`trackStylesheet` 按**属性选择器（href）**而非节点身份找回自己的 link（`src/client/runtime/skin-controller.ts:205-208`），而服务端**预渲染了同 href 的 link**（`src/tap-index-adapter.ts:46`）。
-→ 首次激活的清理删掉的是预载 link，JS 建的那个被永久留下；反复应用同一皮肤，每次累积一个孤儿 `<link>`。
-因为 `patches` 按设计就是**未作用域的任意 CSS**（`contracts/skin-manifest-v2.schema.json`），**泄漏的 patches 会在别的皮肤下继续上色**。
-修法：以刚创建的节点身份（或 `data-dsh-skin-link` 标记）为准，不要按 href 反查。
+**B1 · 样式表 `<link>` 泄漏 → `<head>` 无界增长** ✅ **已修（补丁 06）**
+`trackStylesheet` 按**属性选择器（href）**而非节点身份找回自己的 link（`src/client/runtime/skin-controller.ts:205-208`），而服务端**预渲染了同 href 的 link**（`src/tap-index-adapter.ts:46`）且排在更前面。
+→ 每次激活的清理删掉的是预渲染 link，JS 建的那个被永久留下：**每次切皮肤泄漏最多两个 link、终生不回收**，每个都是一次额外的样式重算。
 
-**B2 · v1→v2 升级会静默丢掉用户选的皮肤**
+> **本报告的一处更正（初版写错了）。** 初版在这里断言「泄漏的 patches 会在别的皮肤下继续上色」——**这是错的**。`transformSkinCss` 对 `skin.css` 与 `patches.css` 的**每一个选择器**都强制加了 `html[data-dsh-skin="<id>"]` 作用域（`src/core/css-safety/transform.ts:189-193`），所以属性一翻转，旧 link 的规则就完全失效。`patches.css` 的「自由」指**可以选中任意元素**，不是**可以逃出作用域**。真实代价只有 `<head>` 膨胀 + 样式重算开销，严重性低于初版描述，但仍需修。
+>
+> 修法与验证：改成由 loader 返回自己创建的元素、按**节点身份**拆卸（返回 void 的注入式 loader 保留兜底反查）；新测试钉的是**有界性**（反复切换后 link 数不增长），不是清空——那个预渲染 link 不属于任何一次激活，本来就该留下。测试已验证「有牙」：回退源码立即失败。
+
+**B2 · v1→v2 升级会静默丢掉用户选的皮肤** ✅ **已修（补丁 04）**
 种子（未初始化时写 blue-fantasy）跑在 legacy bridge **之前**（`src/index.ts:363-368` vs `src/legacy-bridge.ts:254-281`）：bridge 看到 v2 已有值就跳过 id 迁移，却**仍然删掉旧段**。
 而 `src/index.ts:359-362` 的注释声称的正好相反。
 
@@ -134,9 +136,9 @@
 
 | # | 事项 | 落点 | 工作量 | 契约变更 |
 |---|---|---|---|---|
-| **F1** | **运行时自绘遮蔽** —— 让遮蔽对所有皮肤生效，而不是遥不可及的 CSS 变量 | `decoration-layers.ts` + `background.ts` | S/M | 无 |
-| **F2** | **背景媒体卫生** —— 隐藏暂停、`prefers-reduced-motion`、`poster`、error 诊断、卸载前 `pause()` | `decoration-layers.ts` + boot 里的 owner | S | 无 |
-| **F3** | **修 B1 的 `<link>` 泄漏**（按节点身份，不按 href） | `skin-controller.ts:205-208` | S | 无 |
+| **F1** ✅ | **运行时自绘遮蔽** —— 让遮蔽对所有皮肤生效，而不是遥不可及的 CSS 变量 | `decoration-layers.ts` + `background.ts` | S/M | 无 |
+| **F2** ✅ | **背景媒体卫生** —— 隐藏暂停、`prefers-reduced-motion`、`poster`、error 诊断、卸载前 `pause()` | `decoration-layers.ts` + boot 里的 owner | S | 无 |
+| **F3** ✅ | **修 B1 的 `<link>` 泄漏**（按节点身份，不按 href） | `skin-controller.ts:205-208` | S | 无 |
 | F4 | **按皮肤推荐背景参数**（`skin.json` 加 `tuning` 块 + 首次激活套用 + 「恢复皮肤默认」） | schema + controller + 卡片 | M | **additive** |
 | F5 | **`dsh-skin background get\|set`** + 导出 `writeActiveState` | `scripts/dsh-skin.cjs`；`src/index.ts:45` | S | 无 |
 | F6 | **背景参数实时跟随** —— 把现有轮询从「只跟选择」扩展到「也跟背景」 | `boot.ts:316-367` | S | 无 |
@@ -148,28 +150,38 @@
 | F12 | **`GET /v2/diagnostics` + 卡片里的「皮肤健康」折叠块**（把现在不可见的 unmatched 规则 / cleanup-failed / catalog warnings 露出来） | `routes-v2.ts` + `SkinCenter.tsx` | S/M | 无 |
 | F13 | **扫描期「可服务性」检查**（每个 manifest relPath 是否真在 `assets/`/`preview/` 下），作为 catalog warning | `skin-repo.ts:231-240` | S | 无 |
 | F14 | **对比度/可读性审计**：拿真实背景媒体算最坏情况的文字对比度 | `token-audit.ts` 思路扩展 | M/L | 无 |
-| F15 | **修 B2 种子顺序**（种子前先探测 legacy 状态） | `index.ts:363-368` | S | 无 |
-| F16 | **修 B3 正则不一致**（抽一个共享常量） | `validate.ts` + `tap-index-adapter.ts` | S | 无 |
+| F15 ✅ | **修 B2 种子顺序**（种子前先探测 legacy 状态） | `index.ts:363-368` | S | 无 |
+| F16 ✅ | **修 B3 正则不一致**（抽一个共享常量） | `validate.ts` + `tap-index-adapter.ts` | S | 无 |
 | F17 | **修 C8 忙等 / C9 临时目录 GC** | `provenance.ts:353-356`、`active-state.ts:83` | S | 无 |
 | F18 | **收紧 D1/D2/D3**：`repairSkinFromMarket` 不要铸市场 provenance；`/verify` 默认不自动替换；WE token 绑定文件而非目录 | `provenance.ts`、`routes-v2.ts`、`we-routes.ts` | M | 无 |
 | F19 | **WE：解码纹理 bundle 缓存（LRU + 字节预算 + ETag）** | `we-routes.ts:767-807` | M | 无 |
 | F20 | **macOS 友好**：场景工程「拷文件夹导入」路径 + `canPlayType` codec 预检（避免 `.mov/.mkv` 静默退化成预览） | `we-routes.ts:855-865`、`wallpaper.ts:1117-1174` | S | 无 |
 | F21 | **锚点健壮性**：带 fallback 的锚点注册表 + 运行时自检。release notes 几乎全是「重新锚定宿主 DOM」，一堆以皮肤命名的回归测试就是这个成本的证据 | `semantic-adapter.ts` 全域 | L | 无 |
 
-**建议的动手顺序**：F1 + F2 + F3（一次改完，直击痛点、无契约变更、面小）→ F5 + F6 + F7（让工具链真的能远程/脚本化控制）→ F10（省掉重复的 6.6MB）→ F15~F17（小而硬的 bug）→ F3* 生态缝（F4 需要契约变更，要先想清楚）。
+**已完成**：F1、F2、F3、F15、F16（见第 5 节，六个补丁、三道门禁、零回归）。
+**建议的下一步**：F5 + F6 + F7（让工具链真的能脚本化控制皮肤与背景参数）→ F8 + F9 + F11 + F12 + F13（小面、无契约变更）→ F10（省掉重复的 6.6MB）→ F17 + F18（忙等/临时目录/安全收紧）→ F4 与 F21（需要维护者决策：前者是契约变更，后者是架构级改动）。
 
 ---
 
 ## 5. 我实际改了什么
 
-### 5.1 已落地的两处代码改动（可直接提 PR）
+### 5.1 已落地的六处代码改动（可直接提 PR）
 
-补丁在 **`mods/`**，每个都带原始基线文件，可直接 `git apply`：
+补丁在 **`mods/`**，每个都带原始基线文件，可直接 `patch -p1` / `git apply`：
 
 | 补丁 | 改的文件 | 内容 | 状态 |
 |---|---|---|---|
-| `mods/01-runtime-occlusion.patch` | `src/client/background.ts` | **F1** 运行时自绘遮蔽层 | 语法已验 |
-| `mods/02-backdrop-media-policy.patch` | `src/client/runtime/decoration-layers.ts` | **F2** 视频背景生命周期 + 无障碍 | 语法已验 |
+| `mods/01-runtime-occlusion.patch` | `src/client/background.ts` | **F1** 运行时自绘遮蔽层 | ✅ 测试通过 |
+| `mods/02-occlusion-tests.patch` | `tests/background.spec.ts` | **F1** 的 4 个测试 + 查找改为按属性 | ✅ 有牙已验证 |
+| `mods/03-backdrop-media-policy.patch` | `src/client/runtime/decoration-layers.ts` | **F2** 视频背景生命周期 + 无障碍 | ✅ 测试通过 |
+| `mods/04-legacy-bridge-before-seed.patch` | `src/index.ts` | **F15 / B2** 先迁移后种子 | ✅ 测试通过 |
+| `mods/05-skin-id-single-pattern.patch` | `validate.ts` + `tap-index-adapter.ts` + 2 spec | **F16 / B3** id 正则统一 | ✅ 有牙已验证 |
+| `mods/06-stylesheet-link-leak.patch` | `skin-controller.ts` + `skin-runtime.spec.ts` | **F3 / B1** `<link>` 泄漏 | ✅ 有牙已验证 |
+
+六个补丁全部：
+- 在**全新目录**里对原始文件 `patch -p1` 应用成功，10 个结果文件与 `mods/patched/` **逐字节一致**
+- 过上游自己的三道门禁：`typecheck` 0 错误、`test` 零回归（对照实验）、`build` 成功
+- 新增 7 个测试，其中 3 个**单独验证过「有牙」**（回退源码即失败）
 
 **01 做了什么**
 - 新增一个 body 级 fixed 遮罩元素（`data-dsh-backdrop-scrim`），`background: var(--dsw-skin-scrim-color, #000)` + `opacity = 遮蔽值/100`
@@ -178,15 +190,24 @@
 - 顺手修掉一个原有缺陷：`dispose()` 会把 `--dsw-skin-scrim` 留在 body 上（原报告 C 段第 8 条）
 
 **02 做了什么**
+- 四个测试：遮罩按正确几何与透明度绘制；0 值移除；主开关与 WE 壁纸下保持关闭；`dispose()` 不留下任何一层或变量
+- 上游的 `blurElement()` 辅助函数原来是「找 body 下第一个 `aria-hidden` 的 div」，被新层误匹配；改为按两个运行时遮罩层各自的稳定属性寻址
+
+**03 做了什么**
 - `clearLayer()` 在摘除节点前先调媒体策略的 teardown、并 `pause()` 视频（原代码只 `removeChild`；裸摘的 `<video>` 在部分浏览器里继续解码，监听器也会活过本次激活）
 - `<video>` 增加 `preload="metadata"`（默认 `auto` 会在首屏前把整段几 MB 拉完，而这层可能永远不可见）
 - 增加稳定钩子 `data-dsh-backdrop-media`，让 `patches.css` 和第三方不必猜层级或哈希类名
 - 新增 `attachBackdropMediaPolicy()`：`visibilitychange` 隐藏即暂停 / 可见恢复；`prefers-reduced-motion: reduce` 时**不自动播放、解出一帧后按住**（仍给到画面，只是不动）
 - 监听器与 `matchMedia` 都登记进 `WeakMap` 的 teardown，随激活销毁，符合 R6
 
-**为什么选这两个**：直击痛点（遮蔽是死的 → F1；视频没有降噪/尊重偏好的手段 → F2）、**无契约变更**（不碰 `additionalProperties:false` 的 schema，不破坏任何现有皮肤）、**符合他们自己的契约**（R3/R4 要求皮肤「隐藏时暂停、最小化非动画 `backdrop-filter`」——背景视频正是他们自己没做到的那处）、改动面小可回滚。
+**04–06 做了什么**：见 `mods/README.md` 的逐项说明，或直接读补丁——每个补丁内的注释都写了「原行为为什么是错的」。
 
-**未纳入**：F3（`<link>` 泄漏，原报告 B1）虽然是最高优先级的**缺陷**，但它属于独立的一处修复，混在这个 PR 里会让 review 变复杂；建议单独一个 `fix(skin-center): track the stylesheet by node identity` 提交。
+**为什么选这六个**：前三项直击实际痛点（遮蔽是死的 → F1；视频没有降噪/尊重偏好的手段 → F2），后三项是调查中证据最硬、影响最明确的**纯缺陷**（F3/F15/F16），且**全部无契约变更**——不碰 `additionalProperties:false` 的 schema，不重命名任何已持久化的标识符、线协议字段或 profile 格式，不破坏任何现有皮肤。
+
+**仍然未纳入**（不是遗漏，是需要维护者决策）：
+- **F4 按皮肤推荐背景参数** —— 字段本身是 additive，但 v2 schema 是 `additionalProperties: false`，**旧版皮肤中心会拒绝使用了该字段的皮肤**。这是兼容性决策，不是机械修改。
+- **F14 对比度/可读性审计** —— 是新增分析能力，不是对现有代码的优化。
+- **F21 锚点健壮性** —— 对语义适配器的架构级改动，是清单上最大的一项。
 
 ### 5.2 立即可用的临时修补（不重建插件）
 

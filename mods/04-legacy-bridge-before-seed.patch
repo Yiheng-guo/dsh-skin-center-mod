@@ -1,0 +1,53 @@
+--- baseline/src/index.ts	2026-10-01 03:23:46
++++ patched/src/index.ts	2026-10-01 03:23:46
+@@ -354,24 +354,18 @@
+     console.error('[ui-skin-center] route registration failed:', error)
+   }
+ 
+-  // Default-skin seed (market on-demand plan): only blue-fantasy ships in
+-  // the package; every other skin is a market install into the user skins
+-  // directory. A first boot with no persisted selection activates the shipped
+-  // default once, so fresh installs see the intended look without the user
+-  // opening the skin center. Existing selections are never overwritten; a
+-  // selection no longer in the catalog resolves to the stock look browser-side.
+-  try {
+-    const statePath = defaultActiveStatePath()
+-    seedDefaultActiveSkin(statePath, (id) => findSkin(loadSkinCatalog(), id) !== null)
+-  } catch (error) {
+-    console.error('[ui-skin-center] default-skin seed failed:', error)
+-  }
+-
+   // One-shot legacy bridge (issue #506): migrate the retired dsh-skin
+   // managed-section selection into the v2 store and strip the legacy rows.
+   // Idempotent and fail-closed. Notes go to the host log only when the
+   // bridge migrated, cleaned, or failed — the nothing-to-migrate steady
+   // state stays silent instead of logging on every boot (issue #788).
++  //
++  // ORDER IS SEMANTIC: the bridge must run BEFORE the default-skin seed.
++  // The bridge reads the v2 selection first and skips the id migration when
++  // one is already persisted, but it still strips the legacy section. Seeding
++  // first therefore wrote blue-fantasy into an empty v2 store, the bridge saw a
++  // selection and stood down, and the legacy rows were removed anyway — a v1
++  // upgrade silently lost the skin the user had chosen, with no error anywhere.
+   try {
+     const statePath = defaultActiveStatePath()
+     const knownIds = loadSkinCatalog().skins.map((s) => s.manifest.id)
+@@ -384,4 +378,18 @@
+   } catch (error) {
+     console.error('[ui-skin-center] legacy bridge failed:', error)
+   }
++
++  // Default-skin seed (market on-demand plan): only blue-fantasy ships in
++  // the package; every other skin is a market install into the user skins
++  // directory. A first boot with no persisted selection activates the shipped
++  // default once, so fresh installs see the intended look without the user
++  // opening the skin center. Existing selections are never overwritten — which
++  // is exactly why this runs after the legacy bridge above; a selection no
++  // longer in the catalog resolves to the stock look browser-side.
++  try {
++    const statePath = defaultActiveStatePath()
++    seedDefaultActiveSkin(statePath, (id) => findSkin(loadSkinCatalog(), id) !== null)
++  } catch (error) {
++    console.error('[ui-skin-center] default-skin seed failed:', error)
++  }
+ }

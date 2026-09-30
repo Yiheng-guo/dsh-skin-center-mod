@@ -1,0 +1,125 @@
+--- baseline/src/client/runtime/skin-controller.ts	2026-10-01 03:26:16
++++ patched/src/client/runtime/skin-controller.ts	2026-10-01 03:26:16
+@@ -65,8 +65,13 @@
+    * Stylesheet loader seam. Default installs a <link rel="stylesheet"> and
+    * awaits its load (relative url() inside the served CSS resolves against
+    * the route URL — inlining into <style> would break asset resolution).
++   *
++   * Returns the element it created, so the teardown can remove that exact node.
++   * A void return stays legal: an injected loader that hands back nothing leaves
++   * the teardown to fall back to an href lookup, which is best-effort only —
++   * the server also pre-renders a link with the same href for first paint.
+    */
+-  loadStylesheet?: (href: string) => Promise<void>
++  loadStylesheet?: (href: string) => Promise<HTMLLinkElement | void>
+   /** hooks.mjs dynamic import seam for tests. */
+   importHooks?: (url: string) => Promise<unknown>
+   /**
+@@ -164,12 +169,12 @@
+     setBackgroundLayer(currentActivation, buildBackgroundMedia(doc, variant, assetBase))
+   }
+   const unsubscribeTheme = themeSubscribe(() => repaintBackgroundForTheme())
+-  const loadStylesheet = deps.loadStylesheet ?? ((href: string) => new Promise<void>((resolveLink, rejectLink) => {
++  const loadStylesheet = deps.loadStylesheet ?? ((href: string) => new Promise<HTMLLinkElement>((resolveLink, rejectLink) => {
+     const link = doc.createElement('link')
+     link.rel = 'stylesheet'
+     link.href = href
+     const timer = setTimeout(() => rejectLink(new Error(`stylesheet load timeout: ${href}`)), 15000)
+-    link.onload = () => { clearTimeout(timer); resolveLink() }
++    link.onload = () => { clearTimeout(timer); resolveLink(link) }
+     link.onerror = () => { clearTimeout(timer); rejectLink(new Error(`stylesheet load failed: ${href}`)) }
+     doc.head.appendChild(link)
+   }))
+@@ -201,10 +206,19 @@
+    * loadStylesheet; here we only register the teardown). Links keep relative
+    * url() resolution intact — a <style> tag would resolve them against the
+    * document and 404 every skin asset.
++   *
++   * The teardown removes the node the loader handed back, NOT a fresh href
++   * lookup. The href form was wrong: `tap-index-adapter` pre-renders a link with
++   * the same href for first paint, and it sits earlier in <head>, so the lookup
++   * always answered with THAT link — every activation removed the pre-rendered
++   * one and leaked the one it had just created. The head then grew by two links
++   * per switch, each one an extra style recalculation, for the lifetime of the
++   * page. A loader that returns nothing (the injected seam) keeps the old
++   * best-effort lookup.
+    */
+-  function trackStylesheet(activation: number, label: string, href: string): void {
+-    const link = doc.head.querySelector<HTMLLinkElement>(`link[href="${href}"]`)
+-    ledger.record(activation, `style:${label}`, () => link?.remove())
++  function trackStylesheet(activation: number, label: string, href: string, loaded?: HTMLLinkElement | void): void {
++    const owned = loaded ?? doc.head.querySelector<HTMLLinkElement>(`link[href="${href}"]`)
++    ledger.record(activation, `style:${label}`, () => owned?.remove())
+   }
+ 
+   /**
+@@ -348,11 +362,11 @@
+         const patchesHref = entry.manifest.contributes.patches !== undefined
+           ? `${apiBase}/skins/${id}/patches`
+           : null
+-        await loadStylesheet(stylesheetHref)
+-        trackStylesheet(activation, 'stylesheet', stylesheetHref)
++        const stylesheetLink = await loadStylesheet(stylesheetHref)
++        trackStylesheet(activation, 'stylesheet', stylesheetHref, stylesheetLink)
+         if (patchesHref !== null) {
+-          await loadStylesheet(patchesHref).catch(() => {})
+-          trackStylesheet(activation, 'patches', patchesHref)
++          const patchesLink = await loadStylesheet(patchesHref).catch(() => undefined)
++          trackStylesheet(activation, 'patches', patchesHref, patchesLink)
+         }
+         if (seq !== latestRequest) throw new StaleSwitch()
+         installBackground(activation, entry)
+--- baseline/tests/skin-runtime.spec.ts	2026-10-01 03:26:17
++++ patched/tests/skin-runtime.spec.ts	2026-10-01 03:26:17
+@@ -338,11 +338,13 @@
+       for (const bad of options.failFetchFor ?? []) {
+         if (href.includes(bad)) throw new Error(`load ${href} -> 500`)
+       }
+-      // Mirror the default loader's DOM effect so trackStylesheet finds it.
++      // Mirror the default loader's DOM effect AND its return value: the
++      // teardown removes the node the loader hands back, not an href lookup.
+       const link = document.createElement('link')
+       link.rel = 'stylesheet'
+       link.href = href
+       document.head.appendChild(link)
++      return link
+     })
+     const errors: string[] = []
+     const controller = createSkinController({
+@@ -376,6 +378,36 @@
+     expect(document.documentElement.getAttribute('data-dsh-skin')).toBe('matrix')
+     expect(document.head.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(1)
+     expect(ledger.entries().some((e) => e.kind === 'release')).toBe(true)
++  })
++
++  it('does not leak one stylesheet link per switch when the server pre-rendered one', async () => {
++    const { controller } = harness()
++    // Exactly what tap-index-adapter renders before the runtime boots: a link
++    // with the very href the controller is about to request, earlier in <head>.
++    const preRendered = document.createElement('link')
++    preRendered.rel = 'stylesheet'
++    preRendered.href = '/api/skin-center/v2/skins/harbor/stylesheet'
++    document.head.appendChild(preRendered)
++
++    await controller.switchTo('harbor', entryFor('harbor'))
++    const own = [...document.head.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]')].find((l) => l !== preRendered)
++    expect(own).toBeDefined()
++
++    await controller.switchTo('matrix', entryFor('matrix'))
++    // The link the runtime created for harbor must be gone. An href lookup
++    // answered with the pre-rendered node instead, removed that one, and leaked
++    // the created one — one leaked link per switch, for the life of the page.
++    expect(own!.isConnected).toBe(false)
++
++    // The invariant is boundedness, not emptiness: the pre-rendered link is not
++    // owned by any activation and legitimately survives, so the head holds the
++    // pre-rendered link plus the current skin's own. Switching repeatedly must
++    // not move that number.
++    for (const id of ['mint', 'harbor', 'matrix', 'harbor']) {
++      await controller.switchTo(id, entryFor(id))
++    }
++    expect(document.head.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(2)
++    expect(document.head.querySelector('link[rel="stylesheet"]')).toBe(preRendered)
+   })
+ 
+   it('switch to stock removes styles and the attribute', async () => {

@@ -1,21 +1,24 @@
 # mods — patches against `@linxin666/dsh-client-ui-skin-center` v0.4.4
 
-Three unified diffs against **pristine upstream source**, with the pristine files
-kept alongside so the change is reviewable without cloning upstream.
+Six unified diffs against **pristine upstream source**, with the pristine files
+kept alongside so every change is reviewable without cloning upstream.
 
 ```
 baseline/   pristine upstream files, exactly as published
-patched/    the same files with all three patches applied
+patched/    the same files with all six patches applied
 *.patch     diff -u baseline/... patched/...
 ```
 
 Apply, in order:
 
 ```sh
-cd <upstream checkout>            # github.com/zhu1090093659/dsh-skins, or a sparse checkout of src/ tests/
+cd <upstream checkout>            # github.com/zhu1090093659/dsh-skins, or a sparse checkout
 patch -p1 < mods/01-runtime-occlusion.patch
 patch -p1 < mods/02-occlusion-tests.patch
 patch -p1 < mods/03-backdrop-media-policy.patch
+patch -p1 < mods/04-legacy-bridge-before-seed.patch
+patch -p1 < mods/05-skin-id-single-pattern.patch
+patch -p1 < mods/06-stylesheet-link-leak.patch
 ```
 
 `-p1` because the diffs carry the `src/…` / `tests/…` prefix, not a leading
@@ -98,6 +101,55 @@ does it (`src/client/wallpaper.ts`). One product, two standards.
 
 ---
 
+## 04-legacy-bridge-before-seed.patch — `src/index.ts`
+
+**Problem.** The plugin seeded the default skin *before* running the legacy v1→v2
+bridge. The bridge reads the v2 selection first and stands down when one is
+already persisted, but it strips the legacy section regardless. So on a v1
+upgrade the seed wrote `blue-fantasy` into the empty v2 store, the bridge saw a
+selection and skipped the id migration, and the legacy rows were deleted anyway:
+**the user's chosen skin was silently lost, with no error anywhere.** The comment
+above the seed claimed the opposite of what the code did.
+
+**Change.** Run the bridge first, then the seed. Nothing else moves; the comment
+now records why the order is semantic rather than incidental.
+
+## 05-skin-id-single-pattern.patch — `validate.ts`, `tap-index-adapter.ts`, two specs
+
+**Problem.** Two different skin-id patterns. The manifest validator accepted
+`^[a-z][a-z0-9-]{0,31}$`, so `a-` and `x--y` validated; the index injector
+required kebab-case and threw on them. The bootstrap catches that throw and
+degrades to the stock look, so **such a skin installed cleanly and then never
+rendered**, with no error the user could see.
+
+**Change.** One exported `SKIN_ID_PATTERN`, read by both. Kebab-case is the shape
+this project's own scaffolding produces, so the gate moves to match the renderer
+and a bad id now fails validation with a readable message. All 53 published skin
+ids were checked against both patterns before tightening; every one satisfies both.
+
+## 06-stylesheet-link-leak.patch — `skin-controller.ts`, `skin-runtime.spec.ts`
+
+**Problem.** `trackStylesheet` registered its teardown by *looking the link up
+again by href*. The server pre-renders a link with the same href for first paint
+(`tap-index-adapter`), and it sits earlier in `<head>`, so the lookup always
+answered with **that** node: every activation removed the pre-rendered link and
+leaked the one it had just created. The head grew by up to two links per switch,
+each one an extra style recalculation, for the life of the page.
+
+**Change.** The loader hands back the element it created and the teardown removes
+that exact node. A void return stays legal, so an injected loader keeps the old
+best-effort lookup.
+
+**Correction to the survey.** The report claimed a leaked `patches` link could
+keep painting under another skin. That is **wrong**: `transformSkinCss` force-scopes
+every selector in both `skin.css` and `patches.css`, so a stale link's rules are
+inert once `html[data-dsh-skin]` flips. The real cost is unbounded `<head>` growth
+and style-recalculation work, which is what the new test pins (boundedness, not
+emptiness — the pre-rendered link belongs to no activation and legitimately
+survives).
+
+---
+
 ## Verification
 
 Run in an upstream checkout with the patches applied:
@@ -105,38 +157,39 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 628 passed / 15 failed — **zero regressions**, see below |
-| `pnpm build` | succeeds; all four change markers present in `lib/client.js` |
+| `pnpm test` | 631 passed / 15 failed — **zero regressions**, see below |
+| `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
 
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 643 | 15 | **628** |
+| these patches | 646 | 15 | **631** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
 `ice-princess`, `mint`, `phoebe-atelier`, `wallpaper-exclusive`, `last-exile`,
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
-checkout. **Zero AssertionError / TypeError / ReferenceError.** The four added
-tests all pass (628 − 624).
+checkout. **Zero AssertionError / TypeError / ReferenceError.** The seven added
+tests all pass (631 − 624), and three of them were individually proven to fail
+when the corresponding source fix is reverted.
 
-Reproducibility: applying the three patches to the pristine files reproduces
-`patched/` byte-for-byte.
+Reproducibility: applying the six patches to the pristine files reproduces
+`patched/` byte-for-byte (10 files).
 
 ## Not included
 
-The highest-priority *defect* found in the survey is deliberately left out, because
-it is a separate concern and mixing it in would make review harder:
+The remaining items are in `../MODDING-REPORT.md` with location, effort and
+whether they need a contract change. Three are deliberately held back rather than
+overlooked:
 
-- `src/client/runtime/skin-controller.ts` tracks its own stylesheet `<link>` by
-  attribute selector (href) while the server pre-renders a link with the same href
-  — so the first activation's teardown removes the preload link and leaves the
-  JS-created one permanently, accumulating one orphan `<link>` per switch. Because
-  `patches` is unscoped free-selector CSS by contract, a leaked link can keep
-  painting under another skin.
-
-Suggested as its own commit: `fix(skin-center): track the stylesheet by node
-identity`. Details and 17 more items in `../MODDING-REPORT.md`.
+- **Per-skin recommended background values** (`tuning` block in `skin.json`) — the
+  field is additive, but the v2 schema is `additionalProperties: false`, so
+  *older* skin-center versions would reject a skin that uses it. That is a
+  compatibility decision for the maintainer, not a mechanical fix.
+- **Contrast / legibility audit** against the real background media — a new
+  analysis, not an optimisation of existing code.
+- **Anchor robustness** across host rebuilds — an architectural change to the
+  semantic adapter, and the largest item on the list.
