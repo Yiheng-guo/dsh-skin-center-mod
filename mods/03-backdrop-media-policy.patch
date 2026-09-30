@@ -1,0 +1,111 @@
+--- baseline/src/client/runtime/decoration-layers.ts	2026-10-01 01:58:13
++++ patched/src/client/runtime/decoration-layers.ts	2026-10-01 02:04:46
+@@ -107,9 +107,89 @@
+   }
+ }
+ 
+-/** Remove every node an activation left in a layer (used on dispose). */
++/**
++ * Give the backdrop video a lifecycle policy: pause while the document is
++ * hidden, and honour the viewer's motion preference by holding the artwork on
++ * one frame instead of animating it.
++ *
++ * The wallpaper path already pauses on hidden (client/wallpaper.ts) and the
++ * repository's own performance guidelines require it (R3, "frame loops and
++ * infinite animations must pause when hidden"); the skin backdrop was the one
++ * place still keeping a full-bleed loop decoding in a background window. The
++ * motion-preference half is new: a looping video is precisely the sustained
++ * animation `prefers-reduced-motion` exists for.
++ */
++function attachBackdropMediaPolicy(doc: Document, video: HTMLVideoElement): void {
++  const motion = doc.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)') ?? null
++  const reduceMotion = (): boolean => motion?.matches === true
++  let frozen = false
++
++  /** Reduced motion: decode one frame, then hold it. */
++  const freeze = (): void => {
++    video.pause()
++    if (frozen) return
++    frozen = true
++    video.autoplay = false
++    video.loop = false
++    // The still needs a decoded frame, which `metadata` alone will not produce.
++    video.preload = 'auto'
++    video.addEventListener('loadeddata', () => video.pause(), { once: true })
++  }
++
++  const sync = (): void => {
++    if (reduceMotion()) {
++      freeze()
++      return
++    }
++    if (doc.hidden) {
++      video.pause()
++      return
++    }
++    // Muted media needs no gesture; a rejected play() (autoplay policy, decode
++    // failure) must never surface as an unhandled rejection.
++    void Promise.resolve(video.play()).catch(() => {})
++  }
++
++  const onVisibility = (): void => sync()
++  const onMotion = (): void => sync()
++
++  doc.addEventListener('visibilitychange', onVisibility)
++  motion?.addEventListener?.('change', onMotion)
++  sync()
++
++  mediaPolicies.set(video, () => {
++    doc.removeEventListener('visibilitychange', onVisibility)
++    motion?.removeEventListener?.('change', onMotion)
++    video.pause()
++  })
++}
++
++/**
++ * Teardown registered by background media that owns listeners (the backdrop
++ * video's visibility and motion-preference handling). A WeakMap keeps the
++ * policy out of the DOM and off the element's public shape.
++ */
++const mediaPolicies = new WeakMap<HTMLElement, () => void>()
++
++/**
++ * Remove every node an activation left in a layer (used on dispose).
++ *
++ * Media gets an explicit teardown before detach: a `<video>` that is merely
++ * unparented keeps decoding in some browsers, and its listeners would outlive
++ * the activation. Both are contract requirements (performance guidelines
++ * R3/R6) that the wallpaper path already honours.
++ */
+ export function clearLayer(layer: HTMLElement): void {
+-  while (layer.firstChild) layer.removeChild(layer.firstChild)
++  while (layer.firstChild) {
++    const child = layer.firstChild as HTMLElement
++    const policy = mediaPolicies.get(child)
++    if (policy !== undefined) {
++      mediaPolicies.delete(child)
++      policy()
++    }
++    if (child.tagName === 'VIDEO') (child as HTMLVideoElement).pause()
++    layer.removeChild(child)
++  }
+ }
+ 
+ /**
+@@ -138,8 +218,16 @@
+     video.loop = true
+     video.autoplay = true
+     video.playsInline = true
++    // Metadata only until the element is actually needed: a full-bleed loop can
++    // be megabytes, and default `preload="auto"` pulls all of it before first
++    // paint for a layer that may never become visible.
++    video.preload = 'metadata'
+     video.setAttribute('aria-hidden', 'true')
++    // A stable hook so patches.css and third parties can find the backdrop
++    // without guessing at layer indices or hash class names.
++    video.setAttribute('data-dsh-backdrop-media', '')
+     video.style.cssText = fullBleed
++    attachBackdropMediaPolicy(doc, video)
+     nodes.push(video)
+   }
+   if (layer.scrim) {

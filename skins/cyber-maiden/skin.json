@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schemas.linxin666.org/dsh-skin/v2.json",
+  "skinManifestVersion": 2,
+  "id": "cyber-maiden",
+  "name": "赛博少女 · 冷钢之夜",
+  "nameEn": "Cyber Maiden · Cold Steel Night",
+  "version": "1.0.0",
+  "author": "Yiheng-guo",
+  "tagline": "深夜蓝 · 冷钢蓝灰 · 全息玻璃 · 循环视频背景",
+  "description": "背景是一条 13.57 秒的无缝循环视频：正放 + 倒放拼成的 boomerang，中间用 minterpolate 做 3 倍运动插值慢放（不是重复帧，所以没有顿感）。画面为冷蓝调赛博少女。配色全部从这条循环里量出来 —— 夜底取近乎纯黑的 #01050B，结构线取暗部那档冷蓝 #1A2D49，蓝系最饱和处取 #193D6D 并提亮成品牌蓝，正文取银蓝 #DCE7F5，状态青只给「当前行 / 聚焦输入卡 / 链接 / 选中文本」。语言是「夜里的一块冷钢玻璃」：面是薄玻璃，骨架是 1px 冷蓝线，全屏唯一的实心是新会话那颗钢蓝按钮。暗色专用。",
+  "tags": [
+    "cyberpunk",
+    "anime",
+    "video-background",
+    "cold-blue",
+    "steel-blue",
+    "hologram",
+    "glass",
+    "dark",
+    "dark-only",
+    "loop"
+  ],
+  "accent": "#2F63B8",
+  "order": 90,
+  "preview": {
+    "light": "preview/light.jpg",
+    "dark": "preview/dark.jpg"
+  },
+  "attribution": "皮肤工程与配色（skin.css / patches.css 的全部规则、token 映射与量色流程）为原创。背景取自作者自有素材 media/deepseek-brand-intro.mp4（1280x720）的 0.10s–2.40s —— 该片段第 0 帧是黑帧、2.40s 之后开始淡入 DeepSeek 标题卡，两者都被切掉。该文件是唯一同时满足「无播放器 UI」与「无烘焙品牌字标」的一条：promo/dsh-intro-brand-1080p.mp4 与 promo/dsh-intro-cyberpunk-1080p.mp4 是开机动画播放界面的录屏，画面里烧进了「跳过」按钮、进度条与「点击开启声音」提示，不能用作素材；deepseek-cyberpunk-intro.mp4 与 deepseek-awakening-intro.mp4 左上角有烘焙的 DeepSeek 字标。循环做法：minterpolate 到 90fps 后 setpts=3*PTS（3 倍平滑慢放），再正放 + 倒放拼接。实测无缝：边界拼接 PSNR 55.3 / 51.4 dB，首末帧 YAVG 33.34 / 33.40。素材授权由作者本人决定，见 README。",
+  "contributes": {
+    "stylesheet": "skin.css",
+    "patches": "patches.css",
+    "backgroundMedia": {
+      "dark": {
+        "type": "video",
+        "src": "assets/cyber-maiden-loop.mp4",
+        "scrim": "linear-gradient(90deg, rgba(4,7,14,0.66) 0%, rgba(4,7,14,0.46) 28%, rgba(4,7,14,0.14) 60%, rgba(4,7,14,0.06) 100%), linear-gradient(180deg, rgba(4,7,14,0.12) 0%, rgba(4,7,14,0) 42%, rgba(4,7,14,0.34) 100%)"
+      },
+      "light": {
+        "type": "video",
+        "src": "assets/cyber-maiden-loop.mp4",
+        "scrim": "linear-gradient(90deg, rgba(4,7,14,0.66) 0%, rgba(4,7,14,0.46) 28%, rgba(4,7,14,0.14) 60%, rgba(4,7,14,0.06) 100%), linear-gradient(180deg, rgba(4,7,14,0.12) 0%, rgba(4,7,14,0) 42%, rgba(4,7,14,0.34) 100%)"
+      }
+    }
+  }
+}

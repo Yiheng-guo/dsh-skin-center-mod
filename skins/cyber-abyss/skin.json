@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schemas.linxin666.org/dsh-skin/v2.json",
+  "skinManifestVersion": 2,
+  "id": "cyber-abyss",
+  "name": "深蓝深渊 · 数据流",
+  "nameEn": "Abyssal Current · Data Stream",
+  "version": "1.0.0",
+  "author": "Yiheng-guo",
+  "tagline": "深海蓝 · 电光青 · 放射数据流 · 循环视频背景",
+  "description": "背景是一条 16.57 秒的无缝循环视频：正放 + 倒放拼成的 boomerang，中间用 minterpolate 做 2 倍运动插值慢放。画面是骷髅形状的放射状二进制数据流，随循环一呼一吸地明灭。这条底片比 cyber-maiden 那条**亮得多也艳得多**——画面里几乎没有近黑，中间调是 #1054B2 的鲜蓝，最亮接近纯白——所以面板层次比 cyber-maiden 压得更深，scrim 也重得多（约 40–60% 的纱），否则鲜艳的背景会把同样鲜艳的按钮吞掉。配色从循环里量出：夜底 #00102D、结构 #022964、品牌蓝由最饱和的 #0042A9 提亮成 #0F6AD8、状态青由 #68C0F7 提亮成 #6FE3FF。暗色专用。",
+  "tags": [
+    "cyberpunk",
+    "abstract",
+    "data-stream",
+    "skull",
+    "video-background",
+    "electric-blue",
+    "cyan",
+    "hologram",
+    "glass",
+    "dark",
+    "dark-only",
+    "loop"
+  ],
+  "accent": "#0F6AD8",
+  "order": 91,
+  "preview": {
+    "light": "preview/light.jpg",
+    "dark": "preview/dark.jpg"
+  },
+  "attribution": "皮肤工程（skin.css / patches.css 的全部规则与 token 映射）与 cyber-maiden 共用同一套代码，只有调色板与背景资产不同。背景取自作者自有素材 media/deepseek-startup-intro.mp4（1280x720）的 0.05s–4.25s。该文件经审计确认**既无播放器 UI 也无烘焙品牌字标**（同目录另外两条 media 素材左上角有 DeepSeek 字标；promo/ 两条 1080p 是播放器录屏，画面里烧着「跳过」按钮与进度条）。选它的另一个原因：它的干净窗口有 4.2 秒（brand 那条只有 2.3 秒），而且画面是抽象放射结构，当背景比人物特写更不抢注意力。循环做法：minterpolate 到 60fps 后 setpts=2*PTS（2 倍平滑慢放），再正放 + 倒放拼接。实测无缝：边界拼接 PSNR 34.6 / 32.3 dB（比 cyber-maiden 低是正常的——这条画面动得多，相邻帧本身就差得多）。素材授权由作者本人决定，见 README。",
+  "contributes": {
+    "stylesheet": "skin.css",
+    "patches": "patches.css",
+    "backgroundMedia": {
+      "dark": {
+        "type": "video",
+        "src": "assets/cyber-abyss-loop.mp4",
+        "scrim": "linear-gradient(180deg, rgba(0,6,20,0.42) 0%, rgba(0,6,20,0.30) 40%, rgba(0,6,20,0.52) 100%), radial-gradient(110% 80% at 50% 42%, rgba(0,6,20,0.34) 0%, rgba(0,6,20,0.52) 70%, rgba(0,6,20,0.60) 100%)"
+      },
+      "light": {
+        "type": "video",
+        "src": "assets/cyber-abyss-loop.mp4",
+        "scrim": "linear-gradient(180deg, rgba(0,6,20,0.42) 0%, rgba(0,6,20,0.30) 40%, rgba(0,6,20,0.52) 100%), radial-gradient(110% 80% at 50% 42%, rgba(0,6,20,0.34) 0%, rgba(0,6,20,0.52) 70%, rgba(0,6,20,0.60) 100%)"
+      }
+    }
+  }
+}

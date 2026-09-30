@@ -1,0 +1,122 @@
+--- baseline/src/client/background.ts	2026-10-01 01:58:12
++++ patched/src/client/background.ts	2026-10-01 02:04:46
+@@ -150,6 +150,15 @@
+   private blurElement: HTMLDivElement | null = null
+   /** Currently applied backdrop-filter blur px (cached to avoid redundant style writes during streaming). */
+   private appliedBlur: number | null = null
++  /**
++   * The fixed occlusion veil, present only while occlusion > 0. The runtime
++   * owns this layer instead of leaving occlusion to a skin-consumed CSS
++   * variable: a skin that never reads `--dsw-skin-scrim` (most of them) would
++   * otherwise offer a slider that does nothing.
++   */
++  private scrimElement: HTMLDivElement | null = null
++  /** Currently applied veil alpha 0..1 (cached against redundant style writes). */
++  private appliedScrim: number | null = null
+   /** The body MutationObserver, installed lazily once a blur is active. */
+   private observer: MutationObserver | null = null
+   /** Pending requestAnimationFrame id for a coalesced recheck. */
+@@ -283,6 +292,8 @@
+       this.rafId = null
+     }
+     this.removeBlurElement()
++    this.removeScrimElement()
++    document.body.style.removeProperty(SCRIM_VAR)
+     document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
+     document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
+     document.body.style.removeProperty(BUBBLE_BLUR_VAR)
+@@ -336,13 +347,17 @@
+     document.body.style.setProperty(BUBBLE_BLUR_VAR, this.bubbleBlurValue + 'px')
+   }
+ 
+-  /** Write the current occlusion onto the body CSS variable (0..1 alpha). */
++  /** Write the current occlusion onto the body CSS variable and paint the veil. */
+   private applyOcclusion(): void {
+     if (!this.enabledValue) {
+       document.body.style.removeProperty(SCRIM_VAR)
+-      return
++    } else {
++      document.body.style.setProperty(SCRIM_VAR, String(this.opacityValue / 100))
+     }
+-    document.body.style.setProperty(SCRIM_VAR, String(this.opacityValue / 100))
++    // The veil is the runtime-owned half of occlusion. Painting it here (not
++    // only from syncBlur) keeps the value, its CSS variable and the visible
++    // layer from disagreeing when the control changes on its own.
++    this.syncScrim()
+   }
+ 
+   /**
+@@ -352,6 +367,10 @@
+    */
+   private syncBlur(): void {
+     if (this.disposed) return
++    // The occlusion veil shares this lifecycle: both are body-level fixed
++    // backdrop layers, both are suppressed while a wallpaper owns the
++    // background, and both follow the master switch.
++    this.syncScrim()
+     if (this.hasWallpaper()) {
+       // The wallpaper module owns its own blur (wallpaperBlur); the skin-center
+       // background blur layer must stay off while a wallpaper is mounted so
+@@ -388,6 +407,7 @@
+       element.style.zIndex = '-1'
+       element.style.pointerEvents = 'none'
+       element.setAttribute('aria-hidden', 'true')
++      element.setAttribute('data-dsh-backdrop-blur', '')
+       this.blurElement = element
+       document.body.appendChild(element)
+       this.appliedBlur = null
+@@ -398,8 +418,54 @@
+     this.blurElement.style.backdropFilter = blur
+     // Safari: the vendor-prefixed form is only reachable via setProperty.
+     this.blurElement.style.setProperty('-webkit-backdrop-filter', blur)
++  }
++
++  /**
++   * Apply the occlusion veil. Mirrors {@link syncBlur}: off under the master
++   * switch, off while a wallpaper owns the background (the wallpaper module
++   * carries its own dimming), and inert at 0.
++   */
++  private syncScrim(): void {
++    if (this.disposed) return
++    if (!this.enabledValue || this.hasWallpaper() || this.opacityValue <= 0) {
++      this.removeScrimElement()
++      return
++    }
++    this.ensureScrimElement(this.opacityValue / 100)
+   }
+ 
++  /** Create (if needed) and paint the fixed occlusion veil. */
++  private ensureScrimElement(active: number): void {
++    if (this.scrimElement === null) {
++      const element = document.createElement('div')
++      element.style.position = 'fixed'
++      element.style.inset = '0'
++      element.style.zIndex = '-1'
++      element.style.pointerEvents = 'none'
++      // A skin may tint the veil by declaring --dsw-skin-scrim-color; black is
++      // the neutral default because the numeric control carries no hue.
++      element.style.background = 'var(--dsw-skin-scrim-color, #000)'
++      element.setAttribute('aria-hidden', 'true')
++      element.setAttribute('data-dsh-backdrop-scrim', '')
++      this.scrimElement = element
++      // Insert BEFORE the blur element so the blur samples the veiled backdrop
++      // rather than the raw video: the two are siblings in one stacking order.
++      document.body.insertBefore(element, this.blurElement ?? null)
++      this.appliedScrim = null
++    }
++    if (this.appliedScrim === active) return
++    this.appliedScrim = active
++    this.scrimElement.style.opacity = String(active)
++  }
++
++  /** Remove the fixed occlusion veil, if present. */
++  private removeScrimElement(): void {
++    if (this.scrimElement === null) return
++    this.scrimElement.remove()
++    this.scrimElement = null
++    this.appliedScrim = null
++  }
++
+   /** Remove the fixed blur element, if present. */
+   private removeBlurElement(): void {
+     if (this.blurElement === null) return

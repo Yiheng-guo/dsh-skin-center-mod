@@ -1,0 +1,30 @@
+# Build artifacts and machine-local state — never commit these.
+node_modules/
+.DS_Store
+
+# The upstream source checkout (a 200 MB tree, including market skin assets)
+# and any dependency install inside it.
+.upstream/
+build/.upstream/
+.venv/
+.pnpm-store/
+.uvcache/
+.pipcache/
+.npmcache/
+
+# Render / probe scratch space
+.render/
+.probe/
+.mine/
+.verify/
+*.tsbuildinfo
+
+# Toolchain binaries are fetched, not vendored: 47 MB of static ffmpeg.
+bin/ffmpeg
+tools/bin/ffmpeg
+
+# Local backups made while editing an installed skin or DSH profile
+*.orig-backup
+*.bak
+*.bak-*
+package.json.bak*

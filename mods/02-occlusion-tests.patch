@@ -1,0 +1,86 @@
+--- baseline/tests/background.spec.ts	2026-10-01 02:04:46
++++ patched/tests/background.spec.ts	2026-10-01 02:04:46
+@@ -26,12 +26,22 @@
+   return { controller, writes }
+ }
+ 
+-/** Find the injected fixed backdrop-filter element, if present. */
++/**
++ * Find the injected fixed backdrop-filter element, if present.
++ *
++ * Addressed by its own attribute, not by "the body's aria-hidden div": the
++ * occlusion veil is a second body-level layer with the same shape, so a
++ * shape-based lookup would answer with whichever one happens to come first.
++ */
+ function blurElement(): HTMLElement | null {
+-  const element = document.body.querySelector<HTMLElement>('div[aria-hidden="true"]')
+-  return element?.style.position === 'fixed' ? element : null
++  return document.body.querySelector<HTMLElement>('div[data-dsh-backdrop-blur]')
+ }
+ 
++/** Find the injected fixed occlusion veil, if present. */
++function scrimElement(): HTMLElement | null {
++  return document.body.querySelector<HTMLElement>('div[data-dsh-backdrop-scrim]')
++}
++
+ /** Flush the MutationObserver's coalesced rAF recheck. */
+ async function flush(): Promise<void> {
+   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+@@ -72,8 +82,55 @@
+     controller.dispose()
+   })
+ 
+-  it('setBlurEmpty(6) creates a fixed element and persists the whole snapshot', () => {
+-    const { controller, writes } = rig()
++  it('paints the occlusion veil itself instead of leaving it to skin CSS', () => {
++    const { controller } = rig({ backgroundOpacity: 42 })
++    const veil = scrimElement()
++    expect(veil).not.toBeNull()
++    // A body-level fixed layer at the blur layer's own z-index: above the
++    // backdrop art, below the shell. The runtime owns it because a skin that
++    // never reads --dsw-skin-scrim would otherwise offer a dead slider.
++    expect(veil!.style.position).toBe('fixed')
++    expect(veil!.style.zIndex).toBe('-1')
++    expect(veil!.style.pointerEvents).toBe('none')
++    expect(veil!.style.opacity).toBe('0.42')
++    // The variable stays for skins that do consume it.
++    expect(document.body.style.getPropertyValue(SCRIM_VAR)).toBe('0.42')
++    controller.dispose()
++  })
++
++  it('removes the occlusion veil at 0', () => {
++    const { controller } = rig({ backgroundOpacity: 42 })
++    expect(scrimElement()).not.toBeNull()
++    controller.set(0)
++    expect(scrimElement()).toBeNull()
++    controller.set(42)
++    expect(scrimElement()).not.toBeNull()
++    controller.dispose()
++  })
++
++  it('keeps the occlusion veil off under the master switch and under a wallpaper', () => {
++    const off = rig({ enabled: false, backgroundOpacity: 42 })
++    expect(scrimElement()).toBeNull()
++    off.controller.dispose()
++
++    // A wallpaper carries its own dimming; two veils would double it.
++    document.documentElement.setAttribute('data-dsh-wallpaper-active', '')
++    const wallpaper = rig({ backgroundOpacity: 42 })
++    expect(scrimElement()).toBeNull()
++    wallpaper.controller.dispose()
++  })
++
++  it('dispose leaves neither layer nor the occlusion variable behind', () => {
++    const { controller } = rig({ backgroundOpacity: 42, backgroundBlurEmpty: 6 })
++    expect(scrimElement()).not.toBeNull()
++    expect(blurElement()).not.toBeNull()
++    controller.dispose()
++    expect(scrimElement()).toBeNull()
++    expect(blurElement()).toBeNull()
++    expect(document.body.style.getPropertyValue(SCRIM_VAR)).toBe('')
++  })
++
++  it('setBlurEmpty(6) creates a fixed element and persists the whole snapshot', () => {    const { controller, writes } = rig()
+     controller.setBlurEmpty(6)
+     const element = blurElement()
+     expect(element).not.toBeNull()

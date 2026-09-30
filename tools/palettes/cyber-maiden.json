@@ -1,0 +1,42 @@
+{
+  "name": "赛博少女 · 冷钢之夜",
+  "nameEn": "Cyber Maiden · Cold Steel Night",
+  "asset": "assets/cyber-maiden-loop.mp4",
+  "source": "media/deepseek-brand-intro.mp4",
+  "window": "0.10s + 2.30s",
+  "bake": "pingpong, interp 90 (3x motion-interpolated slow), 1600 wide",
+  "_provenance": [
+    "Measured from the skin's own 13.57 s loop, 15 frames, 1.16 M pixels.",
+    "L<25 cluster (77% of pixels) -> #01050B  -> night",
+    "L25-60 median             -> #1A2D49  -> line",
+    "L60-110 median            -> #425673  -> midtones",
+    "L110+ median              -> #748CAB  -> highlights",
+    "hue 210-240 deg, sat>0.35 -> #193D6D  -> brand, lifted to #2F63B8 for CTA contrast",
+    "hue 180-210 deg (15.5%)   -> #547294  -> accent, electrified to #5FD0E6 (STATE ONLY)",
+    "brightest 1%              -> #B8C1D2  -> ink, lifted to #DCE7F5",
+    "Hue census: 83.4% steel blue / 15.5% cold cyan, no warm colour in frame."
+  ],
+  "colors": {
+    "night": "#04070E",
+    "layer1": "#080F1C",
+    "layer2": "#0E1930",
+    "layer3": "#15243E",
+    "layer4": "#1B2C4A",
+    "line": "#2A4770",
+    "brand": "#2F63B8",
+    "brandHover": "#3D74C9",
+    "brandText": "#6FA3E8",
+    "accent": "#5FD0E6",
+    "ink": "#DCE7F5",
+    "inkDim": "#93A9C6",
+    "caption": "#6A80A0",
+    "dimmed": "#4A5C7A",
+    "onBrand": "#EAF2FF",
+    "success": "#4FD1A5",
+    "warn": "#E8C07A",
+    "warnLabel": "#F0D7A8",
+    "danger": "#E86A88",
+    "menuSolid": "#0A1424",
+    "bubbleHighlight": "#0B1730"
+  }
+}

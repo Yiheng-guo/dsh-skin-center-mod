@@ -1,0 +1,267 @@
+/**
+ * 赛博少女 · 冷钢之夜 — L2/L3 layer.
+ *
+ * Visual language: 「夜里的一块冷钢玻璃」
+ *   - 面: thin glass, always translucent, because the loop keeps moving behind;
+ *   - 骨: 1px cold-blue hairlines (--skin-line);
+ *   - 青: cold cyan (--skin-accent) is STATE ONLY — never decoration.
+ *
+ * Every selector below anchors on the skin-center's L2 semantic attributes
+ * (data-dsh-surface / data-dsh-part), which the compat adapter maintains for
+ * the official shell. Nothing here depends on a CSS-Modules hash class name,
+ * so an official rebuild degrades to "rule stops applying" instead of
+ * "GUI looks broken".
+ *
+ * Layout discipline: this file only touches paint — color, background,
+ * border-color, box-shadow, outline, filter, cursor. No margin / padding /
+ * size / position. A skin must never be able to move the shell.
+ *
+ * The loader force-scopes every selector under
+ * html[data-dsh-skin="<this skin's id>"], so they are written unscoped.
+ */
+
+/* ------------------------------------------------------------------ *
+ * 0. Base
+ * ------------------------------------------------------------------ */
+
+::selection {
+  background: var(--skin-accent);
+  color: var(--skin-night);
+}
+
+*:focus-visible {
+  outline: 1px solid var(--skin-accent);
+  outline-offset: 1px;
+}
+
+a,
+a:visited {
+  color: var(--dsw-alias-link);
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in srgb, var(--skin-accent) 45%, transparent);
+}
+
+a:hover {
+  text-decoration-color: var(--skin-accent);
+}
+
+/* Thin cold scrollbars — the shell already reads the scrollbar tokens, this
+   only narrows the track so the hairline language stays consistent. */
+* {
+  scrollbar-width: thin;
+}
+
+/* ------------------------------------------------------------------ *
+ * 1. Left navigation column — the darkest area of the loop sits here,
+ *    so the glass can be at its thinnest.
+ * ------------------------------------------------------------------ */
+
+[data-dsh-surface='sidebar'] {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--skin-glass) 78%, transparent) 0%,
+    color-mix(in srgb, var(--skin-glass) 62%, transparent) 55%,
+    color-mix(in srgb, var(--skin-glass) 74%, transparent) 100%
+  );
+  box-shadow: inset -1px 0 0 0 var(--dsw-alias-border-l1);
+  backdrop-filter: blur(14px) saturate(115%);
+}
+
+/* The one solid element in the whole frame: the new-session CTA. */
+[data-dsh-part='new-session'] {
+  background-color: var(--skin-brand);
+  border-color: color-mix(in srgb, var(--skin-accent) 40%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--skin-accent) 26%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--skin-night) 55%, transparent),
+    0 6px 20px -10px color-mix(in srgb, var(--skin-brand) 80%, transparent);
+}
+
+[data-dsh-part='new-session']:hover {
+  background-color: var(--dsw-alias-button-primary-hover);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--skin-accent) 55%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--skin-night) 55%, transparent),
+    0 8px 26px -10px color-mix(in srgb, var(--skin-accent) 70%, transparent);
+}
+
+/* Current row: cyan is state, so it gets the accent bar and nothing else. */
+[data-dsh-surface='sidebar'] [aria-current='page'],
+[data-dsh-surface='sidebar'] [data-active='true'] {
+  box-shadow: inset 2px 0 0 0 var(--skin-accent);
+}
+
+/* ------------------------------------------------------------------ *
+ * 2. Conversation column
+ * ------------------------------------------------------------------ */
+
+[data-dsh-surface='conversation'] {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--skin-night) 34%, transparent) 0%,
+    color-mix(in srgb, var(--skin-night) 22%, transparent) 42%,
+    color-mix(in srgb, var(--skin-night) 40%, transparent) 100%
+  );
+}
+
+[data-dsh-surface='session-header'] {
+  background: color-mix(in srgb, var(--skin-night) 55%, transparent);
+  box-shadow: inset 0 -1px 0 0 var(--dsw-alias-border-l1);
+  backdrop-filter: blur(12px);
+}
+
+/* Message rows: a hairline rule instead of a hard divider. */
+[data-dsh-part='message-row'] {
+  border-color: transparent;
+}
+
+[data-dsh-part='message-row'] + [data-dsh-part='message-row'] {
+  box-shadow: inset 0 1px 0 0 color-mix(in srgb, var(--skin-line) 22%, transparent);
+}
+
+[data-dsh-part='message-body'] {
+  color: var(--skin-ink);
+  text-wrap: pretty;
+}
+
+/* ------------------------------------------------------------------ *
+ * 3. Composer — the focus state is the loudest cyan in the app.
+ * ------------------------------------------------------------------ */
+
+[data-dsh-surface='composer'] {
+  background: color-mix(in srgb, var(--skin-night) 46%, transparent);
+  box-shadow: inset 0 1px 0 0 var(--dsw-alias-border-l1);
+  backdrop-filter: blur(10px);
+}
+
+[data-dsh-part='composer-input'] {
+  background-color: color-mix(in srgb, var(--skin-glass) 62%, transparent);
+  border-color: var(--dsw-alias-border-l2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 30%, transparent);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+[data-dsh-part='composer-input']:focus-within,
+[data-dsh-part='composer-input']:focus {
+  border-color: var(--skin-accent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--skin-accent) 55%, transparent),
+    0 0 24px -8px color-mix(in srgb, var(--skin-accent) 60%, transparent);
+}
+
+/* The frosted seat the skin-center mounts behind the composer follows the
+   same hairline so the two layers read as one surface. */
+html[data-dsh-backdrop-active] [data-dsh-composer-frost] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 26%, transparent);
+}
+
+[data-dsh-part='queue-dock'],
+[data-dsh-part='turn-tail'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* ------------------------------------------------------------------ *
+ * 4. Right details column
+ * ------------------------------------------------------------------ */
+
+[data-dsh-surface='details'] {
+  background: color-mix(in srgb, var(--skin-glass) 58%, transparent);
+  box-shadow: inset 1px 0 0 0 var(--dsw-alias-border-l1);
+  backdrop-filter: blur(14px);
+}
+
+[data-dsh-part='resize-handle']:hover {
+  background-color: color-mix(in srgb, var(--skin-accent) 45%, transparent);
+}
+
+/* ------------------------------------------------------------------ *
+ * 5. Settings modal & overlays — near-opaque, so long forms stay legible.
+ * ------------------------------------------------------------------ */
+
+[data-dsh-surface='settings'] {
+  background-color: var(--dsw-alias-bg-layer-1);
+  border-color: var(--dsw-alias-border-l2);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 34%, transparent),
+    var(--dsw-alias-shadow-lv3);
+}
+
+[data-dsh-surface='overlay'] {
+  background-color: var(--dsw-alias-bg-overlay);
+  backdrop-filter: blur(16px) saturate(110%);
+}
+
+[role='dialog'] {
+  border-color: var(--dsw-alias-border-l2);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 30%, transparent);
+}
+
+/* Menu / hovercard surfaces stay glassy but darker than the panels. */
+[role='menu'],
+[role='listbox'] {
+  background-color: var(--dsw-alias-specific-menu);
+  border: 1px solid var(--dsw-alias-border-l2);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 28%, transparent),
+    var(--dsw-alias-shadow-lv2);
+}
+
+/* ------------------------------------------------------------------ *
+ * 6. Markdown — code gets the strongest hairline in the app.
+ * ------------------------------------------------------------------ */
+
+pre,
+code {
+  border-color: color-mix(in srgb, var(--skin-line) 42%, transparent);
+}
+
+pre {
+  background-color: var(--dsw-alias-markdown-code-block);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--skin-line) 24%, transparent);
+}
+
+:not(pre) > code {
+  background-color: var(--dsw-alias-markdown-inline-code);
+  color: var(--dsw-alias-label-primary-bluish);
+}
+
+blockquote {
+  border-inline-start-color: var(--skin-accent);
+  color: var(--dsw-alias-label-secondary);
+}
+
+hr {
+  border-color: var(--dsw-alias-border-l1);
+}
+
+table th {
+  background-color: color-mix(in srgb, var(--skin-glass) 70%, transparent);
+  color: var(--dsw-alias-label-primary);
+}
+
+table td,
+table th {
+  border-color: var(--dsw-alias-border-l1);
+}
+
+/* ------------------------------------------------------------------ *
+ * 7. States — success / warn / danger keep their own hue so the cyan
+ *    state language is never ambiguous.
+ * ------------------------------------------------------------------ */
+
+[data-state='error'],
+[data-status='error'] {
+  border-color: var(--dsw-alias-state-error-secondary);
+}
+
+/* ------------------------------------------------------------------ *
+ * 8. Motion
+ * ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  [data-dsh-part='composer-input'] {
+    transition: none;
+  }
+}
