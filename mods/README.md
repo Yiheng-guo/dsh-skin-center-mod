@@ -1,11 +1,11 @@
 # mods — patches against `@linxin666/dsh-client-ui-skin-center` v0.4.4
 
-Six unified diffs against **pristine upstream source**, with the pristine files
+Nine unified diffs against **pristine upstream source**, with the pristine files
 kept alongside so every change is reviewable without cloning upstream.
 
 ```
 baseline/   pristine upstream files, exactly as published
-patched/    the same files with all six patches applied
+patched/    the same files with all nine patches applied
 *.patch     diff -u baseline/... patched/...
 ```
 
@@ -19,6 +19,9 @@ patch -p1 < mods/03-backdrop-media-policy.patch
 patch -p1 < mods/04-legacy-bridge-before-seed.patch
 patch -p1 < mods/05-skin-id-single-pattern.patch
 patch -p1 < mods/06-stylesheet-link-leak.patch
+patch -p1 < mods/07-provenance-hygiene.patch
+patch -p1 < mods/08-http-caching-and-integrity.patch
+patch -p1 < mods/09-frost-and-detector-consistency.patch
 ```
 
 `-p1` because the diffs carry the `src/…` / `tests/…` prefix, not a leading
@@ -150,6 +153,109 @@ survives).
 
 ---
 
+## 07-provenance-hygiene.patch — `provenance.ts`, `active-state.ts`, two specs
+
+Three defects in the security-adjacent persistence layer.
+
+**(a) A spin loop blocked the event loop.** `repairSkinFromMarket` waited for the
+just-removed destination's directory entry to settle (Windows indexer/AV →
+transient `EBUSY`/`EPERM`) with `while (Date.now() - start < 50) {}`. A synchronous
+spin cannot help a synchronous syscall — it only freezes the host for up to 50 ms.
+Replaced with an exported async `renameWithRetry`: awaited `setTimeout` backoff
+(10 ms doubling, 1 s budget), retrying only transient codes, rethrowing others
+immediately and the last transient after the budget. Same failure semantics.
+
+**(b) Temporary directories leaked on crash.** The atomic write and the repair
+paths create a sibling temp dir and remove it in a `finally`; a process that dies
+mid-write leaves it forever and nothing swept them. Added `sweepStaleTempDirs`
+with per-module exact name patterns, a 1 h staleness threshold, directory-only,
+never recursing or throwing, throttled to one sweep per minute per directory so a
+per-request write does not gain a directory listing.
+
+**(c) The file that gates hook trust could assert market origin for local bytes.**
+The repair path wrote `source: 'dsh-market.com'` provenance for a copy taken from
+the package's **own** bundled `skins/` directory. Provenance is what later decides
+whether a user-directory skin's `hooks.mjs` may execute, so locally-produced bytes
+carried an origin claim that was false. New `LOCAL_PROVENANCE_SOURCE = 'local'` for
+that path: a local document is still integrity-verifiable but is **not**
+market-trusted, so its hooks are refused; a bundled copy is instead trusted
+through the reviewed-hooks registry when its bytes match. Market installs keep
+their trust, unchanged.
+
+> The sweeper uses `opendirSync` rather than `readdirSync` because
+> `tests/catalog-cache.spec.ts` counts global `readdirSync` calls to prove that a
+> state write never rescans the skin catalog. The sweep only enumerates the state
+> directory, never a catalog root, so the equivalent primitive keeps that
+> assertion honest without editing a spec outside this change's scope.
+
+## 08-http-caching-and-integrity.patch — `routes-v2.ts`, `skin-repo.ts`, two specs
+
+**(a) Assets were fully buffered, uncacheable and unseekable.** Every
+`assets/`/`preview/` request did a `readFileSync` into memory and answered
+`200` + `cache-control: no-store`, with no `ETag`, no `Last-Modified` and no
+`Range`. A 6.6 MiB background video was therefore re-downloaded in full on every
+reload, and the host held a whole copy per request. Now: one `statSync` derives a
+strong `ETag` and `Last-Modified`, `Accept-Ranges: bytes` is advertised,
+`If-None-Match` (list, `*`, weak-tolerant; takes precedence over
+`If-Modified-Since`) answers `304` with no body, a single `bytes=` range answers
+`206` + `Content-Range: bytes s-e/size`, an unsatisfiable range answers `416` +
+`bytes */size`, and the body streams via `createReadStream` + `pipeline` with the
+descriptor lifetime tied to the response closing.
+
+> `bytes=-N` is implemented as the **last N bytes**, deliberately diverging from
+> the responder in `src/we-routes.ts`, whose `/(\d*)-(\d*)/` turns `bytes=-500`
+> into `0-500`. That bug is still present there; this patch does not copy it.
+
+**(b) The CSS transform ran again on every stylesheet request.** It is a pure
+function of (skin id, filename, file bytes), so it is now memoised on
+`(skinId, filename, mtimeMs, size)` with a hard cap of 64 entries (≈32 installed
+skins × 2 stylesheets, a few MB worst case, cannot grow with request count),
+evicting the least-recently-served key. Failures are never cached — a whitelist
+violation still answers `422` on every request.
+
+**(c) The integrity route auto-repaired by default.** `POST /v2/verify` defaulted
+to `autoRepair: true`, so any caller could trigger a download from dsh-market.com
+that **replaces user skin directories** without asking. The default is now a
+read-only report; `{"autoRepair": true}` keeps working. `POST /verify` was also
+missing from the header comment that enumerates the routes.
+
+**(d) A manifest could reference an unservable path and 404 silently.** The
+validator accepts any relative path, but only `assets/` and `preview/` are routed,
+so `media/bg.webp` validated, installed, and then silently failed to load. The
+catalog scan now emits a warning for such a reference. Warning only — the skin
+still installs, and the validator's grammar is unchanged.
+
+## 09-frost-and-detector-consistency.patch — `backdrop-scene.ts`, `background.ts` via patch 01, three specs
+
+**(a) The master switch did not turn the composer frost off.** The composer frost
+was applied by a **stylesheet** rule in the neutralizer sheet,
+`blur(var(--dsh-input-card-blur, 10px)) !important`. Two consequences: the
+`!important` sheet rule outranked any runtime value, and its 10 px fallback
+survived the master switch — which *removes* the variable — so "off" blurred the
+composer at 10 px, worse than an explicit 0. The rule is gone; the runtime now
+reads `--dsh-input-card-blur` from `document.body`'s computed style and paints the
+blur inline on the body-level follower. Absent variable ⇒ no follower, no blur;
+present-but-unparseable ⇒ the 10 px compatibility default; otherwise clamped 0–20
+with 0 meaning off. A body `style` attribute observation re-evaluates it live, so
+the slider and the switch take effect without a remount.
+
+The `#1724` invariant is preserved: the blur still lives on a separate body-level
+sibling, never on the composer card (a non-none `backdrop-filter` on the card
+makes it the containing block for the shell's `position:fixed` tooltips).
+
+**(b) Two divergent "the conversation has content" detectors.** `background.ts`
+matched a **bare** `[data-chat-anchor-key]` anywhere in the document, while
+`backdrop-scene.ts` scoped to `[data-conversation-scroll]` and documented stale
+topic-picker rows as the exact reason. Switching to an empty topic could therefore
+leave the backdrop blur and the frost disagreeing. Both now read one exported,
+scrollport-scoped selector; the bare form is gone while every official-shell row
+suffix the old selector covered is retained in both scopes.
+
+> One assertion pair in `tests/wallpaper.spec.ts` pinned the removed sheet rule
+> and was updated to assert the sheet carries no frost rule.
+
+---
+
 ## Verification
 
 Run in an upstream checkout with the patches applied:
@@ -157,7 +263,7 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 631 passed / 15 failed — **zero regressions**, see below |
+| `pnpm test` | 652 passed / 15 failed — **zero regressions**, see below |
 | `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
@@ -165,19 +271,19 @@ Controlled experiment, both runs in the identical `skins/` state:
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 646 | 15 | **631** |
+| these patches | 667 | 15 | **652** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
 `ice-princess`, `mint`, `phoebe-atelier`, `wallpaper-exclusive`, `last-exile`,
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
-checkout. **Zero AssertionError / TypeError / ReferenceError.** The seven added
-tests all pass (631 − 624), and three of them were individually proven to fail
-when the corresponding source fix is reverted.
+checkout. **Zero AssertionError / TypeError / ReferenceError** on both sides of the
+experiment. The 28 added tests all pass (652 − 624), and every fix in this series
+was individually proven to fail when its source change is reverted.
 
-Reproducibility: applying the six patches to the pristine files reproduces
-`patched/` byte-for-byte (10 files).
+Reproducibility: applying the nine patches to the pristine files reproduces
+`patched/` byte-for-byte (21 files, one of them new).
 
 ## Not included
 

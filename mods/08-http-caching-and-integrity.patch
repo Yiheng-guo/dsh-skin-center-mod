@@ -1,0 +1,623 @@
+--- baseline/src/routes-v2.ts	2026-10-01 03:37:31
++++ patched/src/routes-v2.ts	2026-10-01 03:37:31
+@@ -12,6 +12,7 @@
+  *  - GET  /skins/<id>/assets/<path>    static in-directory assets (incl. preview/)
+  *  - GET  /active                      the persisted active skin id + background preferences
+  *  - POST /active                      persist active id and/or background (same-origin fenced)
++ *  - POST /verify                      integrity report; repairs only on {"autoRepair":true}
+  *
+  * The stylesheet/patches responses pass through the CSS safety pipeline
+  * (force-scoped under html[data-dsh-skin="<id>"], whitelist fail-closed), so
+@@ -22,9 +23,11 @@
+  * @module @linxin666/dsh-client-ui-skin-center/routes-v2
+  */
+ 
+-import { existsSync, readFileSync, statSync } from 'node:fs'
++import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
++import type { Stats } from 'node:fs'
+ import type { IncomingMessage, ServerResponse } from 'node:http'
+ import { dirname, extname, join } from 'node:path'
++import { pipeline } from 'node:stream'
+ 
+ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+ 
+@@ -72,8 +75,37 @@
+   fetchImpl?: typeof fetch
+   /** Local source dir mirror override (tests). */
+   localSourceDir?: string
++  /** CSS transform override (tests); defaults to the fail-closed pipeline. */
++  transformCss?: typeof transformSkinCss
+ }
+ 
++/**
++ * Bound on the transformed-CSS memo. One entry is one served stylesheet, so
++ * the installed-typical ceiling is two per skin (skin.css + patches.css); 64
++ * covers 32 installed skins and can never grow with request count. Failures
++ * are never stored, so the cap only ever holds successful transforms.
++ */
++const CSS_TRANSFORM_CACHE_MAX = 64
++
++/** Stat identity a memoized transform is keyed on. */
++interface FileIdentity {
++  mtimeMs: number
++  size: number
++}
++
++/**
++ * Memoized transform entry point: (skin id, filename, stat identity) ->
++ * transformed CSS. It throws exactly what the pipeline throws, and only a
++ * successful result is stored — a whitelist violation must be reported on
++ * every request, never pinned as a stale success.
++ */
++type SkinCssMemo = (
++  entry: SkinCatalogEntry,
++  abs: string,
++  filename: string,
++  identity: FileIdentity,
++) => string
++
+ function sendCss(res: ServerResponse, status: number, code: string): void {
+   res.writeHead(status, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store' })
+   res.end(code)
+@@ -85,6 +117,7 @@
+   entry: SkinCatalogEntry,
+   relPath: string,
+   filename: string,
++  memoTransform: SkinCssMemo,
+ ): void {
+   const abs = resolveInsideSkin(entry, relPath)
+   if (!abs || !existsSync(abs)) {
+@@ -92,16 +125,8 @@
+     return
+   }
+   try {
+-    // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
+-    // headers reject non-Latin1 bytes and skin warnings can embed selector
+-    // fragments with CJK text.
+-    const { code } = transformSkinCss(readFileSync(abs, 'utf8'), {
+-      skinId: entry.manifest.id,
+-      filename,
+-      // Only the main stylesheet derives fallback tints; patches re-deriving
+-      // from their partial token view would override the skin's real values.
+-      deriveFallbacks: filename === 'skin.css',
+-    })
++    const stat = statSync(abs)
++    const code = memoTransform(entry, abs, filename, { mtimeMs: stat.mtimeMs, size: stat.size })
+     sendCss(res, 200, code)
+   } catch (error) {
+     if (error instanceof SkinCssSafetyError) {
+@@ -112,16 +137,159 @@
+   }
+ }
+ 
+-/** Serve one static file from inside the skin directory (fail-closed). */
+-function serveAsset(res: ServerResponse, entry: SkinCatalogEntry, relPath: string): void {
++/** HTTP-date at the whole-second precision Last-Modified compares at. */
++function httpDate(mtimeMs: number): string {
++  return new Date(Math.floor(mtimeMs / 1000) * 1000).toUTCString()
++}
++
++/**
++ * Strong validator over the file's stat identity: same mtime and size -> same
++ * tag. Size is part of it so an in-place edit that keeps the mtime granularity
++ * still invalidates.
++ */
++function statEtag(identity: FileIdentity): string {
++  return `"${Math.floor(identity.mtimeMs).toString(16)}-${identity.size.toString(16)}"`
++}
++
++/**
++ * Conditional-request verdict. If-None-Match wins over If-Modified-Since
++ * (RFC 9110 section 13.1.3): a caller that only carries the date still gets a
++ * 304. Both validators are stat-derived, so a mutated file revalidates.
++ */
++function isNotModified(req: IncomingMessage, etag: string, lastModified: string): boolean {
++  const ifNoneMatch = req.headers['if-none-match']
++  if (typeof ifNoneMatch === 'string' && ifNoneMatch.trim() !== '') {
++    return ifNoneMatch.split(',').some((raw) => {
++      const tag = raw.trim()
++      return tag === '*' || tag === etag || tag === `W/${etag}` || tag.replace(/^W\//, '') === etag
++    })
++  }
++  const ifModifiedSince = req.headers['if-modified-since']
++  if (typeof ifModifiedSince === 'string' && ifModifiedSince.trim() !== '') {
++    const since = Date.parse(ifModifiedSince)
++    if (!Number.isNaN(since)) return Date.parse(lastModified) <= since
++  }
++  return false
++}
++
++/**
++ * Parse one `bytes=` range against the file size. The suffix form
++ * `bytes=-N` means the LAST N bytes, not `0..N` — a naive parser turns it
++ * into the wrong slice and breaks seeking in strict players. Returns null
++ * when the header is absent or is not a single range (RFC 9110 lets the
++ * server ignore such a header and answer the full 200), and 'unsatisfiable'
++ * for a single range that falls outside the file (416).
++ */
++function parseSingleRange(
++  header: string | undefined,
++  size: number,
++): { start: number; end: number } | 'unsatisfiable' | null {
++  if (typeof header !== 'string') return null
++  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim())
++  if (match === null) return null
++  const rawStart = match[1] ?? ''
++  const rawEnd = match[2] ?? ''
++  if (rawStart === '' && rawEnd === '') return null
++  let start: number
++  let end: number
++  if (rawStart === '') {
++    const suffixLength = Number(rawEnd)
++    if (suffixLength === 0) return 'unsatisfiable'
++    start = Math.max(0, size - suffixLength)
++    end = size - 1
++  } else {
++    start = Number(rawStart)
++    end = rawEnd === '' ? size - 1 : Math.min(Number(rawEnd), size - 1)
++  }
++  if (size === 0 || start >= size || start > end) return 'unsatisfiable'
++  return { start, end }
++}
++
++/**
++ * Stream one file (optionally one byte range) while coupling the descriptor's
++ * lifetime to the response, mirroring we-routes.ts: a client that seeks away
++ * mid-body must not leave the host holding sockets and descriptors.
++ */
++function pipeFile(absPath: string, res: ServerResponse, range?: { start: number; end: number }): void {
++  if (res.destroyed || res.writableEnded) return
++  const source = range ? createReadStream(absPath, range) : createReadStream(absPath)
++  const closeSource = (): void => {
++    source.destroy()
++  }
++  res.once('close', closeSource)
++  if (res.destroyed || res.writableEnded) {
++    res.off('close', closeSource)
++    source.destroy()
++    return
++  }
++  try {
++    pipeline(source, res, () => {
++      res.off('close', closeSource)
++      // The callback consumes read and premature-close errors.
++    })
++  } catch {
++    res.off('close', closeSource)
++    source.destroy()
++  }
++}
++
++/**
++ * Serve one static file from inside the skin directory (fail-closed). Assets
++ * are stat-validated and range-capable: `cache-control: no-store` made the
++ * browser re-download a multi-megabyte background video on every render and
++ * refresh, and a full buffer per request held a copy in the host. `no-cache`
++ * keeps the file storable but revalidated, so an unchanged asset costs one
++ * 304 with no body, and a changed one re-fetches.
++ */
++function serveAsset(req: IncomingMessage, res: ServerResponse, entry: SkinCatalogEntry, relPath: string): void {
+   const abs = resolveInsideSkin(entry, relPath)
+-  if (!abs || !existsSync(abs) || !statSync(abs).isFile()) {
++  // One stat drives both the fail-closed existence check and the validator, so
++  // a request never pays for the file twice.
++  let stat: Stats | undefined
++  if (abs) {
++    try {
++      stat = statSync(abs)
++    } catch {
++      stat = undefined
++    }
++  }
++  if (!abs || stat === undefined || !stat.isFile()) {
+     writeJson(res, 404, { ok: false, error: 'asset-not-found' })
+     return
+   }
++  const size = stat.size
++  const etag = statEtag({ mtimeMs: stat.mtimeMs, size })
++  const lastModified = httpDate(stat.mtimeMs)
++  const validators: Record<string, string> = {
++    'cache-control': 'no-cache',
++    etag,
++    'last-modified': lastModified,
++    'accept-ranges': 'bytes',
++  }
+   const mime = MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream'
+-  res.writeHead(200, { 'content-type': mime, 'cache-control': 'no-store' })
+-  res.end(readFileSync(abs))
++  if (isNotModified(req, etag, lastModified)) {
++    res.writeHead(304, validators)
++    res.end()
++    return
++  }
++  const range = parseSingleRange(req.headers.range, size)
++  if (range === 'unsatisfiable') {
++    res.writeHead(416, { ...validators, 'content-range': `bytes */${size}` })
++    res.end()
++    return
++  }
++  if (range !== null) {
++    res.writeHead(206, {
++      ...validators,
++      'content-type': mime,
++      'content-range': `bytes ${range.start}-${range.end}/${size}`,
++      'content-length': range.end - range.start + 1,
++    })
++    pipeFile(abs, res, range)
++    return
++  }
++  res.writeHead(200, { ...validators, 'content-type': mime, 'content-length': size })
++  pipeFile(abs, res)
+ }
+ 
+ /**
+@@ -134,7 +302,46 @@
+   // Installed-only catalog (market/store separation): user dirs are always
+   // installed, builtins only when the package ships them (files whitelist).
+   const shippedSet = (deps.shippedSkinIds ?? shippedSkinIds)()
++  const transformCss = deps.transformCss ?? transformSkinCss
+ 
++  /**
++   * Transformed-CSS memo: (skin id, filename, mtimeMs, size) -> code. The
++   * transform is a pure function of those four values (filename selects
++   * deriveFallbacks), yet it re-parsed the entire stylesheet with lightningcss
++   * on every request. A Map with insertion-order eviction is the LRU here: a
++   * hit is re-inserted, so the first key is the least recently served one and
++   * eviction needs no list. The hard cap bounds the process at one string per
++   * installed stylesheet (see CSS_TRANSFORM_CACHE_MAX) no matter how many
++   * temp skins churn through. Successful transforms only: a whitelist
++   * violation is re-derived and re-reported, never cached as success.
++   */
++  const cssCache = new Map<string, string>()
++  const memoTransform: SkinCssMemo = (entry, abs, filename, identity) => {
++    const key = `${entry.manifest.id}\u0000${filename}\u0000${identity.mtimeMs}\u0000${identity.size}`
++    const hit = cssCache.get(key)
++    if (hit !== undefined) {
++      cssCache.delete(key)
++      cssCache.set(key, hit)
++      return hit
++    }
++    // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
++    // headers reject non-Latin1 bytes and skin warnings can embed selector
++    // fragments with CJK text.
++    const { code } = transformCss(readFileSync(abs, 'utf8'), {
++      skinId: entry.manifest.id,
++      filename,
++      // Only the main stylesheet derives fallback tints; patches re-deriving
++      // from their partial token view would override the skin's real values.
++      deriveFallbacks: filename === 'skin.css',
++    })
++    cssCache.set(key, code)
++    if (cssCache.size > CSS_TRANSFORM_CACHE_MAX) {
++      const oldest = cssCache.keys().next().value
++      if (oldest !== undefined) cssCache.delete(oldest)
++    }
++    return code
++  }
++
+   const catalogHandler: WebRoute['handler'] = (_req, res) => {
+     const catalog = loadCatalog()
+     writeJson(res, 200, {
+@@ -169,7 +376,10 @@
+     } catch {
+       body = null
+     }
+-    const autoRepair = body?.autoRepair !== false
++    // Verification is a read-only report by default: repairing replaces user
++    // skin directories with a download from dsh-market.com, so it only happens
++    // when the caller explicitly asks for it with {"autoRepair":true}.
++    const autoRepair = body?.autoRepair === true
+     const result = await verifyAndRepairAllSkins(loadCatalog, {
+       userDir: deps.userDir,
+       fetchImpl: deps.fetchImpl,
+@@ -248,7 +458,7 @@
+       return
+     }
+     if (sub === 'stylesheet') {
+-      serveStylesheet(res, entry, entry.manifest.contributes.stylesheet, 'skin.css')
++      serveStylesheet(res, entry, entry.manifest.contributes.stylesheet, 'skin.css', memoTransform)
+       return
+     }
+     if (sub === 'patches') {
+@@ -257,7 +467,7 @@
+         writeJson(res, 404, { ok: false, error: 'no-patches' })
+         return
+       }
+-      serveStylesheet(res, entry, patches, 'patches.css')
++      serveStylesheet(res, entry, patches, 'patches.css', memoTransform)
+       return
+     }
+     if (sub === 'hooks.mjs') {
+@@ -285,7 +495,7 @@
+       return
+     }
+     if (sub.startsWith('assets/') || sub.startsWith('preview/')) {
+-      serveAsset(res, entry, sub)
++      serveAsset(req, res, entry, sub)
+       return
+     }
+     writeJson(res, 404, { ok: false, error: 'unknown-skin-resource' })
+--- baseline/src/skin-repo.ts	2026-10-01 03:37:32
++++ patched/src/skin-repo.ts	2026-10-01 03:37:32
+@@ -168,6 +168,32 @@
+ export function canServeSkinHooks(entry: SkinCatalogEntry): boolean {
+   if (entry.manifest.facets?.client === undefined) return false
+   return entry.origin === 'builtin' || marketHooksTrust(entry.manifest, entry.dir).trusted
++}
++
++/**
++ * Manifest file references the asset route cannot serve. The stylesheet,
++ * patches and hooks entry each have a dedicated route branch, so only the
++ * references the client fetches through the `/skins/<id>/` asset path are
++ * checked: that route serves the `assets/` and `preview/` subtrees only, and a
++ * declaration outside them validates, installs, and then 404s silently at
++ * render time (e.g. `media/bg.webp`). Warning-only, not an error: fail-closed
++ * rejection here would uninstall skins that work today except for the broken
++ * reference.
++ */
++function unservablePathWarnings(manifest: SkinManifestV2): string[] {
++  const warnings: string[] = []
++  const check = (label: string, relPath: string): void => {
++    if (relPath.startsWith('assets/') || relPath.startsWith('preview/')) return
++    warnings.push(`${label} "${relPath}" is outside the served assets/ and preview/ directories and will fail to load`)
++  }
++  const media = manifest.contributes.backgroundMedia
++  if (media?.light) check('contributes.backgroundMedia.light.src', media.light.src)
++  if (media?.dark) check('contributes.backgroundMedia.dark.src', media.dark.src)
++  if (manifest.preview) {
++    check('preview.light', manifest.preview.light)
++    check('preview.dark', manifest.preview.dark)
++  }
++  return warnings
+ }
+ 
+ function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<string, SkinCatalogEntry>): void {
+@@ -211,7 +237,7 @@
+       if (spec.origin === 'user' && existing.origin === 'builtin') {
+         // User shadows builtin: replace and note it on the winning entry.
+         catalog.skins = catalog.skins.filter((s) => s !== existing)
+-        const winnerWarnings = [...result.warnings, `shadows the built-in "${manifest.id}" skin`]
++        const winnerWarnings = [...result.warnings, ...unservablePathWarnings(manifest), `shadows the built-in "${manifest.id}" skin`]
+         const trust = marketHooksTrust(manifest, dir)
+         if (trust.warning !== null) winnerWarnings.push(trust.warning)
+         const winner: SkinCatalogEntry = {
+@@ -228,7 +254,7 @@
+       }
+       continue
+     }
+-    const warnings = [...result.warnings]
++    const warnings = [...result.warnings, ...unservablePathWarnings(manifest)]
+     const trust = spec.origin === 'user'
+       ? marketHooksTrust(manifest, dir)
+       : { trusted: false, warning: null }
+--- baseline/tests/routes-v2.spec.ts	2026-10-01 03:37:32
++++ patched/tests/routes-v2.spec.ts	2026-10-01 03:37:32
+@@ -17,6 +17,7 @@
+ 
+ import { makeSkinCenterV2Routes, SKIN_CENTER_V2_PREFIX } from '../src/routes-v2.ts'
+ import { loadSkinCatalog } from '../src/skin-repo.ts'
++import { transformSkinCss } from '../src/core/css-safety/transform.ts'
+ 
+ let root: string
+ let builtin: string
+@@ -216,6 +217,61 @@
+     expect(res.jsonBody.error).toBe('css-whitelist-violation')
+     await server.close()
+   })
++
++  it('memoizes the transform per (skin, filename, stat) and re-runs it after an edit', async () => {
++    writeFixtureSkin('harbor')
++    let calls = 0
++    const server = await serve(makeSkinCenterV2Routes({
++      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
++      activeStatePath: statePath,
++      shippedSkinIds: () => new Set(['harbor']),
++      transformCss: (css, options) => {
++        calls++
++        return transformSkinCss(css, options)
++      },
++    }))
++    const path = `${SKIN_CENTER_V2_PREFIX}/skins/harbor/stylesheet`
++    const first = await call(server.port, 'GET', path)
++    const second = await call(server.port, 'GET', path)
++    expect(first.status).toBe(200)
++    expect(second.text).toBe(first.text)
++    // The second request is answered from the memo, not by re-parsing.
++    expect(calls).toBe(1)
++
++    // A different byte length guarantees a different key even where mtime
++    // resolution is coarse.
++    writeFileSync(join(builtin, 'harbor', 'skin.css'), ':root { --dsw-alias-bg-base: #445566; }\n.panel { color: lime; }\n')
++    const edited = await call(server.port, 'GET', path)
++    expect(calls).toBe(2)
++    expect(edited.text).toContain('#445566')
++    expect(edited.text).not.toBe(first.text)
++    await server.close()
++  })
++
++  it('never caches a whitelist violation as a success', async () => {
++    writeFixtureSkin('evil', { css: '.a { background: url(https://evil.example/x.png); }\n' })
++    let calls = 0
++    const server = await serve(makeSkinCenterV2Routes({
++      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: join(root, 'user') }),
++      activeStatePath: statePath,
++      shippedSkinIds: () => new Set(['evil']),
++      transformCss: (css, options) => {
++        calls++
++        return transformSkinCss(css, options)
++      },
++    }))
++    const path = `${SKIN_CENTER_V2_PREFIX}/skins/evil/stylesheet`
++    const first = await call(server.port, 'GET', path)
++    const second = await call(server.port, 'GET', path)
++    for (const res of [first, second]) {
++      expect(res.status).toBe(422)
++      expect(res.jsonBody.error).toBe('css-whitelist-violation')
++      expect(res.jsonBody.violations.length).toBeGreaterThan(0)
++    }
++    // Re-derived per request: a cached failure would also be a cached verdict.
++    expect(calls).toBe(2)
++    await server.close()
++  })
+ })
+ 
+ describe('v2 hooks trust gate', () => {
+@@ -355,6 +411,66 @@
+     const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/harbor/assets/bg.png`)
+     expect(res.status).toBe(200)
+     expect(res.headers['content-type']).toBe('image/png')
++    await server.close()
++  })
++
++  it('revalidates an unchanged asset to 304 via ETag and Last-Modified', async () => {
++    writeFixtureSkin('harbor')
++    const server = await serve(makeRoutes())
++    const path = `${SKIN_CENTER_V2_PREFIX}/skins/harbor/assets/bg.png`
++    const first = await call(server.port, 'GET', path)
++    expect(first.status).toBe(200)
++    expect(first.headers['accept-ranges']).toBe('bytes')
++    const etag = String(first.headers.etag)
++    expect(etag).toMatch(/^".+"$/)
++    const lastModified = String(first.headers['last-modified'])
++    expect(Number.isNaN(Date.parse(lastModified))).toBe(false)
++
++    const byTag = await call(server.port, 'GET', path, { headers: { 'if-none-match': etag } })
++    expect(byTag.status).toBe(304)
++    expect(byTag.text).toBe('')
++    expect(byTag.headers.etag).toBe(etag)
++
++    const byDate = await call(server.port, 'GET', path, { headers: { 'if-modified-since': lastModified } })
++    expect(byDate.status).toBe(304)
++    expect(byDate.text).toBe('')
++
++    // A stale validator still gets the body, or a mutated asset could never
++    // reach the browser.
++    const stale = await call(server.port, 'GET', path, { headers: { 'if-none-match': '"stale"' } })
++    expect(stale.status).toBe(200)
++    expect(stale.text.length).toBeGreaterThan(0)
++    await server.close()
++  })
++
++  it('serves single byte ranges, including the bytes=-N suffix form', async () => {
++    writeFixtureSkin('harbor')
++    writeFileSync(join(builtin, 'harbor', 'assets', 'frame.bin'), '0123456789')
++    const server = await serve(makeRoutes())
++    const path = `${SKIN_CENTER_V2_PREFIX}/skins/harbor/assets/frame.bin`
++
++    const mid = await call(server.port, 'GET', path, { headers: { range: 'bytes=2-5' } })
++    expect(mid.status).toBe(206)
++    expect(mid.text).toBe('2345')
++    expect(mid.headers['content-range']).toBe('bytes 2-5/10')
++    expect(mid.headers['content-length']).toBe('4')
++    expect(mid.headers['accept-ranges']).toBe('bytes')
++
++    const openEnded = await call(server.port, 'GET', path, { headers: { range: 'bytes=4-' } })
++    expect(openEnded.status).toBe(206)
++    expect(openEnded.text).toBe('456789')
++    expect(openEnded.headers['content-range']).toBe('bytes 4-9/10')
++
++    // Suffix form: the LAST 3 bytes, not 0..3.
++    const suffix = await call(server.port, 'GET', path, { headers: { range: 'bytes=-3' } })
++    expect(suffix.status).toBe(206)
++    expect(suffix.text).toBe('789')
++    expect(suffix.headers['content-range']).toBe('bytes 7-9/10')
++
++    const unsatisfiable = await call(server.port, 'GET', path, { headers: { range: 'bytes=999-' } })
++    expect(unsatisfiable.status).toBe(416)
++    expect(unsatisfiable.headers['content-range']).toBe('bytes */10')
++    expect(unsatisfiable.text).toBe('')
+     await server.close()
+   })
+ 
+@@ -691,6 +807,60 @@
+     expect(res.jsonBody.valid).toBe(1)
+ 
+     // Check disk content
++    expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #fff; }')
++    await server.close()
++  })
++  it('reports tampering without repairing unless autoRepair is explicitly true', async () => {
++    const mirror = join(root, 'mirror-default')
++    mkdirSync(mirror, { recursive: true })
++    const manifestText = JSON.stringify({
++      skinManifestVersion: 2,
++      id: 'user-skin',
++      name: 'User Skin',
++      nameEn: 'User Skin',
++      version: '1.0.0',
++      author: 'tester',
++      contributes: { stylesheet: 'skin.css' },
++    })
++    writeFileSync(join(mirror, 'skin.json'), manifestText)
++    writeFileSync(join(mirror, 'skin.css'), ':root { --dsw-alias-bg-base: #fff; }')
++
++    const user = join(root, 'user')
++    mkdirSync(user, { recursive: true })
++    const userDir = join(user, 'user-skin')
++    mkdirSync(userDir, { recursive: true })
++    writeFileSync(join(userDir, 'skin.json'), manifestText)
++    writeFileSync(join(userDir, 'skin.css'), ':root { --dsw-alias-bg-base: #tampered; }')
++    writeFileSync(join(userDir, 'dsh-market.provenance.json'), JSON.stringify({
++      version: 1,
++      source: 'https://dsh-market.com',
++      id: 'user-skin',
++      files: {
++        'skin.json': createHash('sha256').update(manifestText).digest('hex'),
++        'skin.css': createHash('sha256').update(':root { --dsw-alias-bg-base: #fff; }').digest('hex'),
++      },
++    }))
++
++    const server = await serve(makeSkinCenterV2Routes({
++      loadCatalog: () => loadSkinCatalog({ builtinDir: builtin, userDir: user }),
++      activeStatePath: statePath,
++      userDir: user,
++      localSourceDir: mirror,
++    }))
++
++    // Default: a read-only report. Verification must not replace the user's
++    // directory with a market download unless the caller opts in.
++    const report = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/verify`)
++    expect(report.status).toBe(200)
++    expect(report.jsonBody.ok).toBe(true)
++    expect(report.jsonBody.repaired).toEqual([])
++    expect(report.jsonBody.issues).toBe(1)
++    expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #tampered; }')
++
++    // Explicit opt-in still repairs.
++    const opted = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/verify`, { body: { autoRepair: true } })
++    expect(opted.status).toBe(200)
++    expect(opted.jsonBody.repaired).toContain('user-skin')
+     expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #fff; }')
+     await server.close()
+   })
+--- baseline/tests/skin-repo.spec.ts	2026-10-01 03:37:32
++++ patched/tests/skin-repo.spec.ts	2026-10-01 03:37:32
+@@ -112,6 +112,28 @@
+     const catalog = loadSkinCatalog({ builtinDir: builtin, userDir: user })
+     expect(catalog.skins).toHaveLength(1)
+     expect(catalog.skins[0].warnings).toHaveLength(2)
++  })
++
++  it('warns about manifest file references outside the served asset directories', () => {
++    writeSkin(builtin, 'rogue-media', v2('rogue-media', {
++      contributes: {
++        stylesheet: 'skin.css',
++        backgroundMedia: {
++          light: { type: 'image', src: 'media/bg.webp' },
++          dark: { type: 'video', src: 'assets/bg-dark.webm' },
++        },
++      },
++      preview: { light: 'thumbs/light.jpg', dark: 'preview/dark.jpg' },
++    }))
++    const catalog = loadSkinCatalog({ builtinDir: builtin, userDir: user })
++    // Warning-only: the skin still installs and loads.
++    expect(catalog.diagnostics).toEqual([])
++    const warnings = catalog.skins[0].warnings.join('\n')
++    expect(warnings).toContain('contributes.backgroundMedia.light.src "media/bg.webp"')
++    expect(warnings).toContain('preview.light "thumbs/light.jpg"')
++    // Paths under the served directories stay silent.
++    expect(warnings).not.toContain('assets/bg-dark.webm')
++    expect(warnings).not.toContain('preview/dark.jpg')
+   })
+ 
+   describe('market hooks provenance (issue #1073)', () => {

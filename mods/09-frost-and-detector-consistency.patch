@@ -1,0 +1,479 @@
+--- baseline/src/client/runtime/backdrop-scene.ts	2026-10-01 03:37:31
++++ patched/src/client/runtime/backdrop-scene.ts	2026-10-01 03:37:31
+@@ -17,14 +17,15 @@
+  * from skin theme tokens, not by this scene layer.
+  *
+  * The input card itself ([data-composer-card], the official shell's stable card
+- * anchor) keeps its translucent tint and gains the configurable backdrop blur
+- * (default INPUT_FROST_BLUR_PX).
++ * anchor) keeps its translucent tint; the configurable backdrop blur is painted
++ * by the body-level follower described at {@link COMPOSER_FROST_ATTR}, never by
++ * a rule on the card.
+  *
+- * The card rule is enabled only while the conversation actually has message
+- * content (data-dsh-conversation-content): an empty conversation has no正文 to
+- * occlude, so the input keeps its normal hero appearance without a frost flash.
+- * The strength is provided by --dsh-input-card-blur and falls back to the
+- * compatibility default when the setting has not loaded yet.
++ * The follower exists only while the conversation actually has message content
++ * (data-dsh-conversation-content) and the background controller has published a
++ * non-zero --dsh-input-card-blur. An empty conversation has no content to
++ * occlude, and an absent variable (the master switch is off) must paint no
++ * frost at all rather than falling back to a fixed strength.
+  *
+  * The marker is body/html level (managed outside the surface/part/plugin
+  * enum, see contracts/semantic-attrs-v1.md) and survives a neutralizer
+@@ -69,22 +70,46 @@
+ export const CONVERSATION_CONTENT_ATTR = 'data-dsh-conversation-content'
+ 
+ /**
+- * Stable shell scrollport scoped row selectors. Official builds emit the chat
+- * anchor; the CSS-module suffix fallbacks retain compatibility with older
+- * shells without returning to a body-wide topic/session query.
++ * Stable shell row selectors, scoped to the conversation so BOTH consumers of
++ * "the conversation has content" agree: this module's frost gate and the
++ * background controller's per-state backdrop blur import this one list.
++ *
++ * Official builds emit the chat anchor inside the active scrollport; the
++ * CSS-module suffix fallbacks retain compatibility with older shells and with
++ * the dsh-web-all compat shim's `data-pane="conversation"` center column. The
++ * bare `[data-chat-anchor-key]` form is deliberately absent: topic pickers and
++ * outgoing session trees keep their own anchor nodes during a switch, so a
++ * body-wide query counts those stale rows and flips one layer while the other
++ * still sees an empty conversation.
+  */
+-const ACTIVE_CONVERSATION_CONTENT_SELECTOR = [
++export const ACTIVE_CONVERSATION_CONTENT_SELECTOR = [
+   '[data-conversation-scroll] [data-chat-anchor-key]',
+   '[data-conversation-scroll] [class*="_userRow"]',
+   '[data-conversation-scroll] [class*="_compactionRow"]',
+   '[data-conversation-scroll] [class*="_contextRow"]',
+   '[data-conversation-scroll] [class*="_turnErrorRow"]',
++  '[data-pane="conversation"] [class*="_userRow"]',
++  '[data-pane="conversation"] [class*="_compactionRow"]',
++  '[data-pane="conversation"] [class*="_contextRow"]',
++  '[data-pane="conversation"] [class*="_turnErrorRow"]',
+ ].join(', ')
+ 
+ /** One source that can make backdrop art visible. */
+ export type BackdropSource = 'skin' | 'wallpaper'
+ 
+-/** Compatibility default for the input-card backdrop blur strength (px). */
++/**
++ * CSS custom property carrying the user's composer-card blur in px. The
++ * background controller writes it on `document.body`; it is declared here
++ * because this module holds the variable's only consumer, so the writer imports
++ * the name instead of repeating the literal.
++ */
++export const COMPOSER_FROST_BLUR_VAR = '--dsh-input-card-blur'
++
++/**
++ * Compatibility default for the input-card backdrop blur strength (px), used
++ * only when the body variable is present but unparseable. An absent variable
++ * (the master switch is off) paints no frost at all.
++ */
+ export const INPUT_FROST_BLUR_PX = 10
+ 
+ const sourceSets = new WeakMap<Document, Set<BackdropSource>>()
+@@ -174,7 +199,16 @@
+   const win = doc.defaultView
+   if (win === null || typeof win.MutationObserver !== 'function') return
+   const observer = new win.MutationObserver(() => scheduleConversationContent(doc))
+-  observer.observe(doc.body ?? doc.documentElement, { childList: true, subtree: true })
++  observer.observe(doc.body ?? doc.documentElement, {
++    childList: true,
++    subtree: true,
++    // The frost strength is the body CSS variable the background controller
++    // rewrites when the master switch or the input-card slider changes. That
++    // write is an attribute mutation with no matching childList record, and the
++    // strength must follow it without waiting for unrelated DOM churn.
++    attributes: true,
++    attributeFilter: ['style'],
++  })
+   contentObservers.set(doc, observer)
+ }
+ 
+@@ -202,9 +236,12 @@
+  * rules are inert, so the style can outlive a single mount without changing
+  * any other look.
+  *
+- * The composer card is deliberately absent from this sheet: its frost rides
+- * {@link COMPOSER_FROST_ATTR} instead, because no rule here may put a
+- * containing-block property back on the card (issue #1724).
++ * The composer card is deliberately absent from this sheet: its frost is
++ * applied by the runtime to {@link COMPOSER_FROST_ATTR}, because no rule here
++ * may put a containing-block property back on the card (issue #1724). The
++ * sheet carries no frost rule at all — a fixed fallback strength would keep the
++ * composer blurred while the master switch is off (the variable is absent), and
++ * a stylesheet declaration would outrank the runtime strength.
+  */
+ export function ensureSceneNeutralizer(doc: Document): void {
+   if (doc.head === null) return
+@@ -218,10 +255,6 @@
+       backdrop-filter: none !important;
+       -webkit-backdrop-filter: none !important;
+     }
+-    html[data-dsh-backdrop-active][data-dsh-conversation-content] [${COMPOSER_FROST_ATTR}] {
+-      backdrop-filter: blur(var(--dsh-input-card-blur, ${INPUT_FROST_BLUR_PX}px)) !important;
+-      -webkit-backdrop-filter: blur(var(--dsh-input-card-blur, ${INPUT_FROST_BLUR_PX}px)) !important;
+-    }
+   `
+   doc.head.appendChild(style)
+ }
+@@ -237,6 +270,8 @@
+   frame: number | null
+   /** Last applied border box, so an unchanged frame writes nothing. */
+   applied: string
++  /** Last applied frost strength in px, so an unchanged slider writes nothing. */
++  blur: number | null
+ }
+ 
+ const frostFollowers = new WeakMap<Document, FrostFollower>()
+@@ -285,6 +320,33 @@
+   style.width = `${Math.round(rect.width)}px`
+   style.height = `${Math.round(rect.height)}px`
+   style.borderRadius = radius
++}
++
++/**
++ * Read the frost strength the background controller published on the body.
++ *
++ * The variable is the single source of truth for this layer. Absent means the
++ * master switch is off, so the follower must paint nothing: a fixed fallback
++ * here (or in the neutralizer sheet) left a backdrop skin or wallpaper frosting
++ * the composer at 10 px while the control said off, and ignored the slider
++ * entirely. A present but unparseable value is the one case that falls back to
++ * the compatibility default, so a malformed write cannot silently unfrost the
++ * composer.
++ *
++ * @returns the blur in px, or null when the follower must not exist.
++ */
++function composerFrostBlur(doc: Document): number | null {
++  const body = doc.body
++  const win = doc.defaultView
++  if (body === null || win === null) return null
++  const raw = win.getComputedStyle(body).getPropertyValue(COMPOSER_FROST_BLUR_VAR).trim()
++  if (raw === '') return null
++  const parsed = Number.parseFloat(raw)
++  if (!Number.isFinite(parsed)) return INPUT_FROST_BLUR_PX
++  // The slider range is 0-20, so a hostile or stale variable can never paint an
++  // extreme blur; 0 or below means the user disabled the frost by value.
++  const px = Math.max(0, Math.min(20, Math.round(parsed)))
++  return px > 0 ? px : null
+ }
+ 
+ /** Coalesce a burst of geometry changes into one measurement per frame. */
+@@ -303,34 +365,60 @@
+   })
+ }
+ 
+-/** Mount the follower while a scene is visible and start tracking the card. */
+-function startFrostFollower(doc: Document): void {
+-  if (frostFollowers.has(doc) || doc.body === null) return
+-  const el = doc.createElement('div')
+-  el.setAttribute(COMPOSER_FROST_ATTR, '')
+-  el.setAttribute('aria-hidden', 'true')
+-  const style = el.style
+-  style.position = 'fixed'
+-  style.pointerEvents = 'none'
+-  style.zIndex = COMPOSER_FROST_Z_INDEX
+-  style.borderRadius = 'inherit'
+-  const follower: FrostFollower = { el, resizeObserver: null, observed: null, onResize: null, frame: null, applied: '' }
+-  // A body-level sibling, appended after the app root so the shell's own
+-  // layers (and any skin decoration) keep their place; the rung above decides
+-  // paint order, not the append position.
+-  doc.body.appendChild(el)
+-  frostFollowers.set(doc, follower)
+-  const win = doc.defaultView
+-  if (win !== null && typeof win.ResizeObserver === 'function') {
+-    follower.resizeObserver = new win.ResizeObserver(() => scheduleFrostSync(doc))
++/**
++ * Mount the follower while a scene is visible, start tracking the card and
++ * paint the current frost strength. A follower already tracking this document
++ * only has its strength refreshed, so moving the slider never remounts it.
++ */
++function startFrostFollower(doc: Document, blur: number): void {
++  let follower = frostFollowers.get(doc)
++  if (follower === undefined) {
++    if (doc.body === null) return
++    const el = doc.createElement('div')
++    el.setAttribute(COMPOSER_FROST_ATTR, '')
++    el.setAttribute('aria-hidden', 'true')
++    const style = el.style
++    style.position = 'fixed'
++    style.pointerEvents = 'none'
++    style.zIndex = COMPOSER_FROST_Z_INDEX
++    style.borderRadius = 'inherit'
++    follower = {
++      el,
++      resizeObserver: null,
++      observed: null,
++      onResize: null,
++      frame: null,
++      applied: '',
++      blur: null,
++    }
++    // A body-level sibling, appended after the app root so the shell's own
++    // layers (and any skin decoration) keep their place; the rung above decides
++    // paint order, not the append position.
++    doc.body.appendChild(el)
++    frostFollowers.set(doc, follower)
++    const win = doc.defaultView
++    if (win !== null && typeof win.ResizeObserver === 'function') {
++      follower.resizeObserver = new win.ResizeObserver(() => scheduleFrostSync(doc))
++    }
++    if (win !== null && typeof win.addEventListener === 'function') {
++      follower.onResize = () => scheduleFrostSync(doc)
++      win.addEventListener('resize', follower.onResize)
++    }
++    syncFrostFollower(doc)
+   }
+-  if (win !== null && typeof win.addEventListener === 'function') {
+-    follower.onResize = () => scheduleFrostSync(doc)
+-    win.addEventListener('resize', follower.onResize)
+-  }
+-  syncFrostFollower(doc)
++  applyFrostBlur(follower, blur)
+ }
+ 
++/** Write the follower's frost only when the strength actually changed. */
++function applyFrostBlur(follower: FrostFollower, blur: number): void {
++  if (follower.blur === blur) return
++  follower.blur = blur
++  const filter = `blur(${blur}px)`
++  follower.el.style.backdropFilter = filter
++  // Safari: the vendor-prefixed form is only reachable via setProperty.
++  follower.el.style.setProperty('-webkit-backdrop-filter', filter)
++}
++
+ /** Remove the follower and stop every loop that fed it. */
+ function stopFrostFollower(doc: Document): void {
+   const follower = frostFollowers.get(doc)
+@@ -354,19 +442,21 @@
+ 
+ /**
+  * Attach the composer frost to the current scene state. Called from the shared
+- * marker sync so the follower exists exactly while a backdrop is visible and
+- * the conversation has content — the same gate the card's old frost rule used.
++ * marker sync so the follower exists exactly while a backdrop is visible, the
++ * conversation has content and the background controller published a non-zero
++ * frost strength — the gate the card's old frost rule used, plus the setting.
+  *
+  * The follower tracks the card through a ResizeObserver on the card itself and
+  * one interval-free re-schedule on every re-mount, so a conversation switch
+  * that replaces the composer keeps the frost aligned without a polling loop.
+  */
+ export function syncComposerFrost(doc: Document): void {
+-  const wanted = doc.body !== null && doc.body.hasAttribute(BACKDROP_ACTIVE_ATTR)
++  const sceneAndContent = doc.body !== null && doc.body.hasAttribute(BACKDROP_ACTIVE_ATTR)
+     && doc.body.hasAttribute(CONVERSATION_CONTENT_ATTR)
+-  if (!wanted) {
++  const blur = sceneAndContent ? composerFrostBlur(doc) : null
++  if (blur === null) {
+     stopFrostFollower(doc)
+     return
+   }
+-  startFrostFollower(doc)
++  startFrostFollower(doc, blur)
+ }
+--- baseline/tests/backdrop-scene.spec.ts	2026-10-01 03:37:32
++++ patched/tests/backdrop-scene.spec.ts	2026-10-01 03:37:32
+@@ -8,8 +8,11 @@
+ 
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+ 
++import { BackgroundController } from '../src/client/background.ts'
+ import {
++  ACTIVE_CONVERSATION_CONTENT_SELECTOR,
+   BACKDROP_ACTIVE_ATTR,
++  COMPOSER_FROST_BLUR_VAR,
+   CONVERSATION_CONTENT_ATTR,
+   SCENE_NEUTRALIZER_ATTR,
+   setSceneBackdropActive,
+@@ -41,9 +44,15 @@
+   return scrollport
+ }
+ 
++/** Publish the body variable the background controller writes for the slider. */
++function setInputCardBlur(value: string): void {
++  document.body.style.setProperty(COMPOSER_FROST_BLUR_VAR, value)
++}
++
+ beforeEach(() => {
+   document.body.innerHTML = ''
+   document.head.innerHTML = ''
++  document.body.style.removeProperty(COMPOSER_FROST_BLUR_VAR)
+   document.documentElement.removeAttribute(BACKDROP_ACTIVE_ATTR)
+   document.documentElement.removeAttribute(CONVERSATION_CONTENT_ATTR)
+   // Reset the module-level per-document observer state from a previous test.
+@@ -165,25 +174,54 @@
+ function frostFollower(): HTMLElement | null {
+   return document.body.querySelector<HTMLElement>('[data-dsh-composer-frost]')
+ }
++
++describe('shared conversation-content selector', () => {
++  it('scopes the anchor to the active conversation scrollport', () => {
++    // A stale topic-picker row keeps its anchor outside the scrollport: the
++    // bare-attribute form matched it and made one layer see content where the
++    // other saw an empty conversation.
++    const staleRow = document.createElement('div')
++    staleRow.setAttribute('data-chat-anchor-key', 'stale-topic-row')
++    document.body.appendChild(staleRow)
++    expect(document.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR)).toBeNull()
++
++    // The same node inside the active scrollport is conversation content.
++    const scrollport = document.createElement('div')
++    scrollport.setAttribute('data-conversation-scroll', '')
++    document.body.appendChild(scrollport)
++    scrollport.appendChild(staleRow)
++    expect(document.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR)).toBe(staleRow)
++  })
++
++  it('keeps every official-shell row suffix in both supported scopes', () => {
++    for (const suffix of ['_userRow', '_compactionRow', '_contextRow', '_turnErrorRow']) {
++      expect(ACTIVE_CONVERSATION_CONTENT_SELECTOR).toContain(`[data-conversation-scroll] [class*="${suffix}"]`)
++      expect(ACTIVE_CONVERSATION_CONTENT_SELECTOR).toContain(`[data-pane="conversation"] [class*="${suffix}"]`)
++    }
++  })
++})
+ 
+ describe('composer frost follower (#1724)', () => {
+   it('paints the frost on a body-level follower instead of the composer card', async () => {
+-    // Given an active conversation with a composer card
++    // Given an active conversation with a composer card and a published strength
+     const card = document.createElement('div')
+     card.setAttribute('data-composer-card', '')
+     document.body.appendChild(card)
+     const scrollport = appendConversationRow()
+     expect(scrollport).not.toBeNull()
++    setInputCardBlur('10px')
+ 
+     // When the backdrop becomes visible
+     setSceneBackdropActive(document, 'skin', true)
+ 
+     // Then the card is NOT a containing block: the injected sheet carries no
+     // containing-block property for it, which is what used to redirect the
+-    // shell's fixed tooltips into the scrollport and jolt the page
++    // shell's fixed tooltips into the scrollport and jolt the page. The sheet
++    // carries no frost rule either: a stylesheet fallback would keep painting
++    // while the master switch removes the variable.
+     const sheet = document.head.querySelector(`style[${SCENE_NEUTRALIZER_ATTR}]`)?.textContent ?? ''
+     expect(sheet).not.toContain('[data-composer-card]')
+-    expect(sheet).toContain('[data-dsh-composer-frost]')
++    expect(sheet).not.toContain('[data-dsh-composer-frost]')
+ 
+     // And the frost rides a body-level sibling: empty, inert, and outside the
+     // scrollport that must never grow
+@@ -202,6 +240,7 @@
+     card.setAttribute('data-composer-card', '')
+     document.body.appendChild(card)
+     appendConversationRow()
++    setInputCardBlur('10px')
+     setSceneBackdropActive(document, 'skin', true)
+     expect(frostFollower()).not.toBeNull()
+ 
+@@ -220,6 +259,7 @@
+     card.style.borderRadius = '18px'
+     document.body.appendChild(card)
+     appendConversationRow()
++    setInputCardBlur('10px')
+ 
+     // When the scene activates and the queued frame runs
+     setSceneBackdropActive(document, 'skin', true)
+@@ -232,5 +272,79 @@
+     expect(follower.style.width).toBe('900px')
+     expect(follower.style.height).toBe('140px')
+     expect(follower.style.borderRadius).toBe(card.style.borderRadius)
++  })
++
++  it('follows the published input-card blur and paints nothing without it (master switch off)', async () => {
++    // Given an active scene with content but no published strength: the master
++    // switch is off, so no frost layer may exist at all
++    const card = document.createElement('div')
++    card.setAttribute('data-composer-card', '')
++    document.body.appendChild(card)
++    appendConversationRow()
++    setSceneBackdropActive(document, 'skin', true)
++    expect(document.body.hasAttribute(BACKDROP_ACTIVE_ATTR)).toBe(true)
++    expect(document.body.hasAttribute(CONVERSATION_CONTENT_ATTR)).toBe(true)
++    expect(frostFollower()).toBeNull()
++
++    // When the background controller publishes the user's slider value
++    setInputCardBlur('6px')
++    await deliverMutations()
++    flushFrames()
++
++    // Then the follower appears with exactly that strength
++    expect(frostFollower()?.style.backdropFilter).toContain('blur(6px)')
++
++    // And a later slider move refreshes the strength in place
++    setInputCardBlur('3px')
++    await deliverMutations()
++    flushFrames()
++    expect(frostFollower()?.style.backdropFilter).toContain('blur(3px)')
++
++    // And removing the variable again (switch off) removes the layer, so "off"
++    // can never blur more than an explicit 0
++    document.body.style.removeProperty(COMPOSER_FROST_BLUR_VAR)
++    await deliverMutations()
++    flushFrames()
++    expect(frostFollower()).toBeNull()
+   })
++
++  it('uses the compatibility default only for a present but unparseable strength', async () => {
++    const card = document.createElement('div')
++    card.setAttribute('data-composer-card', '')
++    document.body.appendChild(card)
++    appendConversationRow()
++    setInputCardBlur('nonsense')
++    setSceneBackdropActive(document, 'skin', true)
++
++    expect(frostFollower()?.style.backdropFilter).toContain('blur(10px)')
++  })
+ })
++
++describe('composer frost under the master switch', () => {
++  it('follows the background controller and drops the layer when the switch goes off', async () => {
++    // Given a backdrop scene with content and the controller's default 10 px
++    const card = document.createElement('div')
++    card.setAttribute('data-composer-card', '')
++    document.body.appendChild(card)
++    appendConversationRow()
++    const controller = new BackgroundController({ inputCardBlur: 10 }, () => {})
++    expect(document.body.style.getPropertyValue(COMPOSER_FROST_BLUR_VAR)).toBe('10px')
++    setSceneBackdropActive(document, 'skin', true)
++    expect(frostFollower()?.style.backdropFilter).toContain('blur(10px)')
++
++    // When the user moves the input-card slider, the follower follows it
++    controller.setInputCardBlur(4)
++    await deliverMutations()
++    flushFrames()
++    expect(frostFollower()?.style.backdropFilter).toContain('blur(4px)')
++
++    // And when the master switch goes off the variable disappears, so the
++    // layer must go too: "off" used to keep blurring at the hardcoded default
++    controller.setEnabled(false)
++    expect(document.body.style.getPropertyValue(COMPOSER_FROST_BLUR_VAR)).toBe('')
++    await deliverMutations()
++    flushFrames()
++    expect(frostFollower()).toBeNull()
++    controller.dispose()
++  })
++})
+--- baseline/tests/wallpaper.spec.ts	2026-10-01 03:37:32
++++ patched/tests/wallpaper.spec.ts	2026-10-01 03:37:32
+@@ -882,9 +882,11 @@
+     expect(neutralizer?.textContent).not.toContain('var(--dsw-alias-bg-overlay) 36px')
+     // The frost rides the body-level follower, NOT the card: a backdrop-filter
+     // on the card would make it the containing block for the shell's fixed
+-    // tooltips and jolt the conversation on every composer hover (#1724).
+-    expect(neutralizer?.textContent).toContain('html[data-dsh-backdrop-active][data-dsh-conversation-content] [data-dsh-composer-frost]')
+-    expect(neutralizer?.textContent).toContain('backdrop-filter: blur(var(--dsh-input-card-blur, 10px)) !important;')
++    // tooltips and jolt the conversation on every composer hover (#1724). The
++    // sheet pins no frost strength either: the follower reads
++    // --dsh-input-card-blur at runtime, so a master switch that removes the
++    // variable cannot leave a stylesheet fallback blurring the composer.
++    expect(neutralizer?.textContent).not.toContain('[data-dsh-composer-frost]')
+     expect(neutralizer?.textContent).not.toContain('[data-composer-card] {')
+     // Empty conversation: the content marker is absent, so the frost is off.
+     expect(document.body.hasAttribute('data-dsh-conversation-content')).toBe(false)

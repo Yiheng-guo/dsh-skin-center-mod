@@ -46,7 +46,7 @@
 模糊由运行时自绘一个满视口 `backdrop-filter` div（`src/client/background.ts:353-401`），不依赖皮肤 CSS。
 这解释了实测现象：**同一条链路上只有改模糊有效**。
 
-**A3 · 视频背景没有任何生命周期/无障碍策略** ← 违反他们自己的契约
+**A3 · 视频背景没有任何生命周期/无障碍策略** ← 同一产品里 WE 壁纸那条路做到了，它没做
 `decoration-layers.ts:134-144` 建的 `<video>`：**无 `visibilitychange` 暂停、无 `prefers-reduced-motion`、无 `poster`、无 error 路径、卸载前不显式 `pause()`**。
 - 全仓库 `matchMedia` **零命中**（唯一的 `prefers-reduced-motion` 出现在按钮过渡的 CSS 里）
 - 而 WE 壁纸那条路径**实现了隐藏暂停**（`src/client/wallpaper.ts:914-918`）→ 同产品两套标准
@@ -94,12 +94,27 @@
 | C1 | **资产整文件缓冲、`no-store`、无 Range/ETag** → 6.6MB 视频**每次渲染重下 + 每请求一份完整内存副本**；而包里自己就有支持 Range 的读取器 | `routes-v2.ts:122-124,283` vs `we-routes.ts:134` |
 | C2 | 每次样式表 GET 都重新用 lightningcss 解析，无 memo | `routes-v2.ts:98` |
 | C3 | catalog 指纹每请求 readdir+stat 全部皮肤；路由每请求调 + 每次 index 渲染调 | `skin-repo.ts:271-292,312`；`routes-v2.ts:189,296,331`；`index.ts:338-344` |
-| C4 | **无皮肤激活时 observer 仍在跑**；每条新增节点跑 21 条规则（含两个 `:has()` 的 `querySelectorAll`）+ ≤24 祖先 × 21 规则遍历；shell-rendering 流式时每帧 `getBoundingClientRect()` | `boot.ts:102-103`；`semantic-adapter.ts:211-253,264-290`；`shell-rendering.ts:217-263` ← **违反自家 R1/R5** |
-| C5 | `will-change: transform` 永久停在满视口层 | `decoration-layers.ts:54` ← 违反 R4 |
+| C4 | **无皮肤激活时 observer 仍在跑**；每条新增节点跑 21 条规则（含两个 `:has()` 的 `querySelectorAll`）+ ≤24 祖先 × 21 规则遍历；shell-rendering 流式时每帧 `getBoundingClientRect()` | `boot.ts:102-103`；`semantic-adapter.ts:211-253,264-290`；`shell-rendering.ts:217-263` |
+| C5 | `will-change: transform` 永久停在满视口层 —— **但这是自觉权衡，不是漏改**，见下方更正 | `decoration-layers.ts:54` |
 | C6 | 选择轮询每 2 秒一个请求，永不停止 | `boot.ts:232-233,338-341` |
 | C7 | WE：每张纹理都重读重解析整个 `.pkg` → 20 纹理场景 = 20 次全量读 | `we-routes.ts:784-802` |
 | C8 | `while (Date.now()-start<50)` 忙等**阻塞事件循环** | `provenance.ts:353-356` |
-| C9 | `mkdtempSync` 临时目录崩溃即泄漏，无清扫 | `active-state.ts:83-95`；`provenance.ts:315-316` |
+| C9 | `mkdtempSync` 临时目录崩溃即泄漏，泄漏后无清扫 | `active-state.ts:83-95`；`provenance.ts:315-316` |
+
+### 本报告的第二处更正：性能契约的适用对象
+
+初版在 C4、C5、A3 三处写了「**违反他们自己的 R1/R4/R5/R3**」。**这个说法是错的。**
+`contracts/performance-guidelines-v1.md` 开头把适用范围写得很明确：
+
+> These are the runtime-performance rules for skin **hooks** (`hooks.mjs`, `facets.client`) and their stylesheets.
+
+也就是说 **R1–R6 约束的是皮肤作者写的 `hooks.mjs` 与它们自己的样式表，不是皮肤中心这个插件自身的运行时**。我把「对 skin hooks 的规范」当成了「对这个插件的规范」，属于引错作用域。逐条更正：
+
+- **C5（`will-change` 常驻）—— 不是缺陷，是自觉权衡。** 那段代码的注释写清了动机：它是为修 **issue #1013** 加的。没有它，Chromium 会在无关重绘（流式输出、动画宠物、浮层菜单）时把满视口背景按横带重新栅格化，表现为可见的**竖带闪烁**。所以这是「可见的闪烁」对「常驻一个 GPU 合成层」的取舍，代码选择了前者。**我原本打算「修掉」它，那会把 #1013 放回来**——这是本次调查中我差点做错的一件事。
+- **C4（observer 常驻）—— 引用 R1/R5 不成立。** 它确实有成本（每个新增节点跑 21 条规则），但它是否应该懒启动是**设计取舍**而非违规：语义适配器必须在皮肤激活期间是运行着的，懒启动会让切换瞬间缺少 L2 语义属性、出现一段未套皮肤的中间态。已在 5.x 的「未纳入」里按取舍类项目处理。
+- **A3（视频背景无生命周期）—— 论据改成更硬的那一条。** 修它的理由不是「违反 R3」，而是：**同一个产品里，WE 壁纸那条路已经实现了隐藏暂停，皮肤视频背景没有**（`client/wallpaper.ts:914-918`）。两套标准才是问题所在；再叠加无障碍（`prefers-reduced-motion` 在全仓库零命中）。F2 的修改依据以此为准。
+
+教训写在报告里而不是悄悄改掉：**「违反了某份契约」这种指控，先去读那份契约的适用范围。**
 
 ### D. 安全
 
@@ -143,23 +158,30 @@
 | F5 | **`dsh-skin background get\|set`** + 导出 `writeActiveState` | `scripts/dsh-skin.cjs`；`src/index.ts:45` | S | 无 |
 | F6 | **背景参数实时跟随** —— 把现有轮询从「只跟选择」扩展到「也跟背景」 | `boot.ts:316-367` | S | 无 |
 | F7 | **`dsh-skin use` 实时推送** + 修正过时的「需 reload」提示 | `scripts/dsh-skin.cjs:174-191` | S | 无 |
-| F8 | **修 A4 主开关**（follower 读 `inputCardBlur`，或开关生效时移除 follower） | `backdrop-scene.ts:88,221-224` | S | 无 |
-| F9 | **统一 B5 的内容探测器**（收敛到 scrollport 作用域那一个） | `background.ts:127-133,373-375` | S | 无 |
-| F10 | **资产服务：ETag + Last-Modified + Range + transform memo** | `routes-v2.ts:83-125,283` | M | 无 |
-| F11 | **懒启动 observer**（stock look 时断开适配器与 shell-rendering） | `boot.ts:101-103` | S | 无 |
+| F8 ✅（补丁 09） | **修 A4 主开关**（follower 读 `inputCardBlur`，或开关生效时移除 follower） | `backdrop-scene.ts:88,221-224` | S | 无 |
+| F9 ✅（补丁 09） | **统一 B5 的内容探测器**（收敛到 scrollport 作用域那一个） | `background.ts:127-133,373-375` | S | 无 |
+| F10 ✅（补丁 08） | **资产服务：ETag + Last-Modified + Range + transform memo** | `routes-v2.ts:83-125,283` | M | 无 |
+| F11 | **懒启动 observer** —— **取舍项，不是缺陷**：语义适配器必须在皮肤激活期间运行，懒启动会让切换瞬间缺 L2 属性、出现未套皮肤的中间态。要动就得先量出「stock look 下常驻 observer 的真实开销」再决定 | `boot.ts:101-103` | S | 无 |
 | F12 | **`GET /v2/diagnostics` + 卡片里的「皮肤健康」折叠块**（把现在不可见的 unmatched 规则 / cleanup-failed / catalog warnings 露出来） | `routes-v2.ts` + `SkinCenter.tsx` | S/M | 无 |
-| F13 | **扫描期「可服务性」检查**（每个 manifest relPath 是否真在 `assets/`/`preview/` 下），作为 catalog warning | `skin-repo.ts:231-240` | S | 无 |
+| F13 ✅（补丁 08） | **扫描期「可服务性」检查**（每个 manifest relPath 是否真在 `assets/`/`preview/` 下），作为 catalog warning | `skin-repo.ts:231-240` | S | 无 |
 | F14 | **对比度/可读性审计**：拿真实背景媒体算最坏情况的文字对比度 | `token-audit.ts` 思路扩展 | M/L | 无 |
 | F15 ✅ | **修 B2 种子顺序**（种子前先探测 legacy 状态） | `index.ts:363-368` | S | 无 |
 | F16 ✅ | **修 B3 正则不一致**（抽一个共享常量） | `validate.ts` + `tap-index-adapter.ts` | S | 无 |
-| F17 | **修 C8 忙等 / C9 临时目录 GC** | `provenance.ts:353-356`、`active-state.ts:83` | S | 无 |
-| F18 | **收紧 D1/D2/D3**：`repairSkinFromMarket` 不要铸市场 provenance；`/verify` 默认不自动替换；WE token 绑定文件而非目录 | `provenance.ts`、`routes-v2.ts`、`we-routes.ts` | M | 无 |
+| F17 ✅（补丁 07） | **修 C8 忙等 / C9 临时目录 GC** | `provenance.ts:353-356`、`active-state.ts:83` | S | 无 |
+| F18 ◐ | **收紧 D1/D2/D3**：`repairSkinFromMarket` 不要铸市场 provenance；`/verify` 默认不自动替换；WE token 绑定文件而非目录 | `provenance.ts`、`routes-v2.ts`、`we-routes.ts` | M | 无 |
 | F19 | **WE：解码纹理 bundle 缓存（LRU + 字节预算 + ETag）** | `we-routes.ts:767-807` | M | 无 |
 | F20 | **macOS 友好**：场景工程「拷文件夹导入」路径 + `canPlayType` codec 预检（避免 `.mov/.mkv` 静默退化成预览） | `we-routes.ts:855-865`、`wallpaper.ts:1117-1174` | S | 无 |
 | F21 | **锚点健壮性**：带 fallback 的锚点注册表 + 运行时自检。release notes 几乎全是「重新锚定宿主 DOM」，一堆以皮肤命名的回归测试就是这个成本的证据 | `semantic-adapter.ts` 全域 | L | 无 |
 
-**已完成**：F1、F2、F3、F15、F16（见第 5 节，六个补丁、三道门禁、零回归）。
-**建议的下一步**：F5 + F6 + F7（让工具链真的能脚本化控制皮肤与背景参数）→ F8 + F9 + F11 + F12 + F13（小面、无契约变更）→ F10（省掉重复的 6.6MB）→ F17 + F18（忙等/临时目录/安全收紧）→ F4 与 F21（需要维护者决策：前者是契约变更，后者是架构级改动）。
+**已完成（9 个补丁）**：F1、F2、F3、F8、F9、F10、F13、F15、F16、F17，以及 F18 的 D1/D2 两项。
+全部通过上游三道门禁（typecheck 0 错误 / 测试零回归 / build 成功），**28 个新增测试全部被单独验证过「有牙」**。
+
+**仍未做**：F5、F6、F7（CLI 与实时跟随）、F12（诊断面板）、F18 的 D3（WE token 绑定文件而非目录）、F19（WE 纹理缓存）、F20（macOS 场景导入 + codec 预检）—— 这些是新增能力或独立子系统，不是本次「修 bug」的范围。
+
+**需要决策、不宜由我单方面改**：F4（契约变更，旧版会拒绝）、F11（先量开销）、F14（新增分析能力）、F21（架构级）。
+**已撤回**：C5（`will-change`）—— 核实后确认是修 #1013 的自觉权衡。
+
+> **C5 已从「待修」中移除**：核实后确认那是为修 #1013 做的自觉权衡，动它会把可见的竖带闪烁放回来。详见 C 段的第二处更正。
 
 ---
 

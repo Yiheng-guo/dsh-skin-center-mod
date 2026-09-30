@@ -37,13 +37,16 @@
 │
 ├── MODDING-REPORT.md      ★ 全文分析：架构、20+ 条带 file:line 的缺陷、扩展点、21 项路线图
 │
-├── mods/                  ★ 六个补丁 + 原始基线，可直接 review / git apply
+├── mods/                  ★ 九个补丁 + 原始基线，可直接 review / git apply
 │   ├── 01-runtime-occlusion.patch       background.ts：运行时自绘遮蔽层
 │   ├── 02-occlusion-tests.patch         background.spec.ts：+4 个测试，查找方式改为按属性
 │   ├── 03-backdrop-media-policy.patch   decoration-layers.ts：视频背景生命周期 + 无障碍
 │   ├── 04-legacy-bridge-before-seed.patch  index.ts：修 v1 升级静默丢皮肤
 │   ├── 05-skin-id-single-pattern.patch  id 正则统一（校验器 + 注入器 + 2 个 spec）
 │   ├── 06-stylesheet-link-leak.patch    skin-controller.ts：修 <head> 无界增长
+│   ├── 07-provenance-hygiene.patch      忙等阻塞事件循环 / 临时目录泄漏 / 伪造市场来源
+│   ├── 08-http-caching-and-integrity.patch  ETag+Range+transform memo / verify 默认只读 / 可服务性告警
+│   ├── 09-frost-and-detector-consistency.patch  主开关失效 / 两个分歧的探测器
 │   ├── baseline/          未改动的上游原文（review 用）
 │   └── patched/           改后文件（对照用）
 │
@@ -68,7 +71,7 @@
 
 ---
 
-## 两处改动 + 三个缺陷修复
+## 九处改动
 
 ### 01 · 让遮蔽真正生效
 
@@ -91,7 +94,7 @@
 > 契约明确要求「帧循环与无限动画必须在隐藏时暂停」，而 WE 壁纸那条路径实现了
 > （`client/wallpaper.ts`）、**背景视频没有** —— 同一产品两套标准。
 
-**三个改动都不涉及契约变更**：没有新增/删除 skin manifest 字段（v2 schema 是
+**这九处改动都不涉及契约变更**：没有新增/删除 skin manifest 字段（v2 schema 是
 `additionalProperties: false`，加字段就是契约变更），没有重命名任何已持久化的标识符、
 线协议字段或 profile 格式，不破坏任何现有皮肤。
 
@@ -125,6 +128,26 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 
 ---
 
+### 07 · provenance 层的三个缺陷
+
+- **忙等阻塞事件循环** —— `repairSkinFromMarket` 用 `while (Date.now() - start < 50) {}` 等刚删掉的目录项落定（Windows 索引器/杀软会造成瞬时 `EBUSY`/`EPERM`）。**同步空转帮不上同步系统调用**，只会把宿主卡住最多 50ms。改成导出的异步 `renameWithRetry`：`setTimeout` 退避、10ms 起倍增至 1s 预算、只重试瞬时错误码、其余立即抛、预算耗尽抛最后一个瞬时错误。失败语义不变。
+- **临时目录崩溃即泄漏** —— 原子写与修复路径都在 `finally` 里删临时目录，进程死在中间就永远留着，而且没有任何清扫。加了 `sweepStaleTempDirs`：精确模块前缀 + `mkdtempSync` 形状的 6 位尾、只删目录、只删超过 1 小时的、永不递归也永不抛，并按目录节流到每分钟一次（免得每次写入都多一次目录列举）。
+- **信任门可以自称市场来源** —— 修复路径给**取自包内 `skins/` 的本地拷贝**写了 `source: 'dsh-market.com'`。而 provenance 正是之后判定用户目录皮肤 `hooks.mjs` 能否执行的那个输入。新增 `LOCAL_PROVENANCE_SOURCE = 'local'`：本地来源仍可做完整性校验，但**不获得市场信任、其 hooks 被拒**；内置皮肤改由「已审阅 hooks 注册表 + 字节哈希匹配」建立信任。市场安装的信任完全不变。
+
+### 08 · HTTP 层的四个缺陷
+
+- **资产整文件缓冲、不可缓存、不支持 seek** —— 每个 `assets/`/`preview/` 请求都 `readFileSync` 进内存并回 `no-store`，没有 `ETag` / `Last-Modified` / `Range`。6.6 MiB 的背景视频每次重载都全量重下，宿主每个请求持一份完整副本。现在：stat 派生强 `ETag` 与 `Last-Modified`、广播 `Accept-Ranges: bytes`、`If-None-Match`（支持列表与 `*`、容忍 weak；优先于 `If-Modified-Since`）回 `304` 无 body、单段 `bytes=` 回 `206` + `Content-Range`、不可满足回 `416` + `bytes */size`，body 用 `createReadStream` + `pipeline` 流式发送。
+  > `bytes=-N` 我实现成**最后 N 字节**，**故意没有照抄** `src/we-routes.ts` 的实现 —— 那个 `/(\d*)-(\d*)/` 会把 `bytes=-500` 当成 `0-500`。**那个 bug 现在仍在 `we-routes.ts` 里**，属于未纳入项。
+- **CSS transform 每次请求重跑** —— 它对 (skin id, 文件名, 文件字节) 是纯函数，现在按 `(skinId, filename, mtimeMs, size)` 记忆化，硬上限 64 条（约 32 个皮肤 × 2 张样式表，最坏几 MB，**不随请求数增长**），淘汰最久未用。**失败永不缓存** —— 白名单违规仍然每次 422。
+- **完整性接口默认自动修复** —— `POST /v2/verify` 原来默认 `autoRepair: true`，等于任何调用者都能触发一次从 dsh-market.com 下载并**替换用户皮肤目录**的操作。默认改为只读报告，`{"autoRepair": true}` 仍可用；顺手把 `POST /verify` 补进了文件头那份路由清单。
+- **清单可以引用取不到的路径并静默 404** —— 校验器接受任意相对路径，而只有 `assets/` 与 `preview/` 有路由，于是 `media/bg.webp` 能过校验、能安装，然后静默加载失败。现在扫描期给出 catalog 警告（**仅警告**，皮肤仍可安装，校验语法不变）。
+
+### 09 · 磨砂与探测器的不一致
+
+- **主开关关不掉输入卡磨砂** —— 磨砂原来由一个**样式表**规则施加：`blur(var(--dsh-input-card-blur, 10px)) !important`。两个后果：`!important` 的样式表规则压过任何运行时取值；而它的 10px 兜底在主开关**移除该变量之后依然生效** —— 所以「关」比「设成 0」更糟。规则已删除，改由运行时读 `document.body` 计算样式里的 `--dsh-input-card-blur`，把模糊内联画在 body 级 follower 上：变量缺失 ⇒ 不挂层、不模糊；存在但不可解析 ⇒ 10px 兼容兜底；其余夹到 0–20，0 即关闭。用 body 的 `style` 属性观察做实时重算（不轮询、rAF 合并）。
+  **#1724 的不变量保持不变**：模糊仍然在一个独立的 body 级兄弟元素上，绝不落在输入卡本体（卡片一旦带非 none 的 `backdrop-filter`，就会成为 shell 里 `position:fixed` tooltip 的包含块）。
+- **两个分歧的「会话有内容」探测器** —— `background.ts` 全文匹配**裸的** `[data-chat-anchor-key]`，而 `backdrop-scene.ts` 限定在 `[data-conversation-scroll]` 内、并明确记录了「旧话题选择行」正是误判源。切到空话题时，背景模糊与磨砂可能一个开一个不开。现在两边共用一个导出的、作用域限定到 scrollport 的选择器；裸形式已删除，而旧选择器覆盖到的官方 shell 行后缀在两个作用域里都保留。
+
 ## 验证
 
 不是「写完看着对」。全部在上游仓库里真跑：
@@ -132,7 +155,7 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 | 门禁 | 命令 | 结果 |
 |---|---|---|
 | 类型 | `pnpm typecheck` | **0 错误** |
-| 测试 | `pnpm test` | **631 通过 / 15 失败** |
+| 测试 | `pnpm test` | **652 通过 / 15 失败** |
 | 构建 | `pnpm build` | **成功**，`lib/index.js` + `lib/client.js`，改动标记均在产物中 |
 
 **零回归是跑对照实验得出的**（在完全相同的 `skins/` 状态下）：
@@ -140,7 +163,7 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 | | 测试总数 | 失败 | 通过 |
 |---|---|---|---|
 | 原始上游代码 | 639 | **15** | 624 |
-| 本仓库的补丁 | 646 | **15** | **631** |
+| 本仓库的补丁 | 667 | **15** | **652** |
 
 失败集合完全一致。那 15 个**全部**是 `ENOENT` / `Cannot find module` 指向仓库里的
 **市场皮肤测试夹具**（`matrix` / `maid-atelier` / `orca-link` / `whale-mom` /
@@ -148,10 +171,10 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 `porco-rosso` / `white-snake`）—— 这些皮肤**本来就不在 npm 包里**（`files` 白名单只含
 `skins/blue-fantasy`）。全量 **0 个 AssertionError / TypeError / ReferenceError**。
 
-我新增的 7 个测试全部通过；其中 **3 个被单独验证过「有牙」**——把对应的源码修复临时回退，
+新增的 28 个测试全部通过，**每一个修复都被单独验证过「有牙」**——把对应的源码改动临时回退，
 测试立即失败，恢复后再次通过。
 
-**补丁可复现性**：六个补丁 `patch -p1` 打到原始文件上，10 个文件与 `mods/patched/` **逐字节一致**。
+**补丁可复现性**：九个补丁 `patch -p1` 打到原始文件上，21 个文件（其中 1 个是新增文件）与 `mods/patched/` **逐字节一致**。
 
 ---
 
@@ -267,14 +290,14 @@ while the server pre-renders one with the same href, leaking up to two links int
 `<head>` per switch for the life of the page.
 
 **Verification** — all three upstream gates were run in the upstream tree:
-`pnpm typecheck` 0 errors; `pnpm test` 631 passed / 15 failed with a **controlled
+`pnpm typecheck` 0 errors; `pnpm test` 652 passed / 15 failed with a **controlled
 experiment proving zero regressions** (pristine upstream: 15 failed / 624 passed;
-this fork: 15 failed / 631 passed — same failure set, every remaining failure a
+this fork: 15 failed / 652 passed — same failure set, every remaining failure a
 missing market-skin test fixture that is not part of the npm package);
 `pnpm build` succeeds with the changes present in the bundle. The patches apply
 cleanly to pristine upstream and reproduce `mods/patched/` byte-for-byte across
-ten files, and three of the seven added tests were individually shown to fail
-when their source fix is reverted.
+twenty-one files, and every fix in the series was individually shown to fail when
+its source change is reverted.
 
 No change alters the skin manifest schema (which is
 `additionalProperties: false`, so a new field *would* be a contract change),

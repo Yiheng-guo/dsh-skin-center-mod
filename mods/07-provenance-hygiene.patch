@@ -1,0 +1,745 @@
+--- baseline/src/provenance.ts	2026-10-01 03:37:31
++++ patched/src/provenance.ts	2026-10-01 03:37:31
+@@ -11,7 +11,10 @@
+  *
+  * Fail-closed: invalid provenance and any post-install byte mismatch keep the
+  * hooks-refused behavior for user-directory skins. A pre-provenance install
+- * recovers only by matching this release's generated reviewed identity.
++ * recovers only by matching this release's generated reviewed identity. The
++ * repair path records the origin it actually copied from: only the market
++ * origin grants hook trust, so a copy taken from the package's own bundled
++ * skins/ tree is integrity-verifiable but never market-provenanced.
+  * Forging the provenance
+  * requires write access to $DSH_HOME itself — an attacker with that access
+  * can already install full plugins, so the file is a provenance record,
+@@ -20,8 +23,8 @@
+  */
+ 
+ import { createHash } from 'node:crypto'
+-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+-import { dirname, join, sep } from 'node:path'
++import { cpSync, existsSync, mkdirSync, opendirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
++import { basename, dirname, join, sep } from 'node:path'
+ 
+ import { REVIEWED_SKIN_HOOKS } from './reviewed-hooks.generated.ts'
+ 
+@@ -31,6 +34,21 @@
+ /** Market origin the provenance must pin (mirrors MARKET_ORIGIN in @linxin666/dsh-client-ui-market). */
+ export const MARKET_PROVENANCE_SOURCE = 'https://dsh-market.com'
+ 
++/**
++ * Origin recorded by this package's own repair path when it copies bytes
++ * from a local source (the bundled skins/ tree or an explicit
++ * localSourceDir) instead of downloading them from the market. It is
++ * deliberately NOT the market origin: those bytes never passed through the
++ * market, and market provenance is what makes a user-directory skin's hooks
++ * executable. The document stays structurally valid so integrity
++ * verification can still pin the copied bytes to their sha256, but the
++ * market-only trust gate refuses it.
++ */
++export const LOCAL_PROVENANCE_SOURCE = 'local'
++
++/** Hash-record source values verifySkinIntegrity accepts as a valid provenance document. */
++const VERIFIABLE_PROVENANCE_SOURCES: readonly string[] = [MARKET_PROVENANCE_SOURCE, LOCAL_PROVENANCE_SOURCE]
++
+ function sha256Hex(abs: string): string | null {
+   try {
+     return createHash('sha256').update(readFileSync(abs)).digest('hex')
+@@ -39,29 +57,77 @@
+   }
+ }
+ 
++/** Parsed provenance document: which origin minted it and its per-file hashes. */
++interface ParsedProvenance {
++  source: string
++  files: Record<string, unknown>
++}
++
++interface ProvenanceCheck {
++  failure: 'tampered' | 'missing-files' | null
++  mismatches: string[]
++  missing: string[]
++  totalFilesChecked: number
++}
++
+ /**
+- * Whether the skin directory at dir carries valid official-market
+- * provenance for skinId whose declared hooks entry (already validated as a
+- * safe relative path by the manifest validator) hash-matches the recorded
+- * bytes — skin.json included, so the facet entry path itself is pinned.
++ * Parse one provenance document and re-hash every recorded file. Null when
++ * the document is absent, malformed, the origin is unknown, or the id does
++ * not match; otherwise the source (market or local) plus the recorded files.
+  */
+-export function verifyMarketProvenance(dir: string, skinId: string, hooksEntry: string): boolean {
++function parseProvenance(dir: string, skinId: string): ParsedProvenance | null {
+   let raw: unknown
+   try {
+     raw = JSON.parse(readFileSync(join(dir, MARKET_PROVENANCE_FILENAME), 'utf8'))
+   } catch {
+-    return false
++    return null
+   }
+-  if (typeof raw !== 'object' || raw === null) return false
++  if (typeof raw !== 'object' || raw === null) return null
+   const prov = raw as Record<string, unknown>
+-  if (prov.version !== 1) return false
+-  if (prov.source !== MARKET_PROVENANCE_SOURCE) return false
+-  if (prov.id !== skinId) return false
++  if (prov.version !== 1) return null
++  if (typeof prov.source !== 'string' || !VERIFIABLE_PROVENANCE_SOURCES.includes(prov.source)) return null
++  if (prov.id !== skinId) return null
+   const files = prov.files
+-  if (typeof files !== 'object' || files === null) return false
+-  const hashes = files as Record<string, unknown>
++  if (typeof files !== 'object' || files === null) return null
++  return { source: prov.source, files: files as Record<string, unknown> }
++}
++
++/**
++ * Re-hash the recorded files against the current bytes: which files are
++ * missing or mismatched, plus how many entries were actually checked.
++ */
++function checkProvenanceFiles(dir: string, files: Record<string, unknown>): ProvenanceCheck {
++  const mismatches: string[] = []
++  const missing: string[] = []
++  let totalFilesChecked = 0
++  for (const [rel, expected] of Object.entries(files)) {
++    if (typeof expected !== 'string') continue
++    totalFilesChecked++
++    const actual = sha256Hex(join(dir, ...rel.split('/')))
++    if (actual === null) {
++      missing.push(rel)
++    } else if (actual !== expected) {
++      mismatches.push(rel)
++    }
++  }
++  if (missing.length > 0) return { failure: 'missing-files', mismatches, missing, totalFilesChecked }
++  if (mismatches.length > 0) return { failure: 'tampered', mismatches, missing, totalFilesChecked }
++  return { failure: null, mismatches: [], missing: [], totalFilesChecked }
++}
++
++/**
++ * Whether the skin directory at dir carries valid official-market
++ * provenance for skinId whose declared hooks entry (already validated as a
++ * safe relative path by the manifest validator) hash-matches the recorded
++ * bytes — skin.json included, so the facet entry path itself is pinned.
++ * Only the market origin passes: local-origin provenance never grants hook
++ * trust.
++ */
++export function verifyMarketProvenance(dir: string, skinId: string, hooksEntry: string): boolean {
++  const prov = parseProvenance(dir, skinId)
++  if (prov === null || prov.source !== MARKET_PROVENANCE_SOURCE) return false
+   for (const rel of ['skin.json', hooksEntry]) {
+-    const expected = hashes[rel]
++    const expected = prov.files[rel]
+     if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) return false
+     const actual = sha256Hex(join(dir, ...rel.split('/')))
+     if (actual === null || actual !== expected) return false
+@@ -94,8 +160,11 @@
+ 
+ /**
+  * Deep integrity verification of one skin directory: checks all files declared
+- * in dsh-market.provenance.json against recorded sha256 hashes, or verifies
+- * against the reviewed legacy registry when provenance is absent.
++ * in dsh-market.provenance.json against recorded sha256 hashes for either
++ * verifiable origin (the market installer's, or this package's own local
++ * repair), or verifies against the reviewed legacy registry when provenance is
++ * absent. hooksTrusted is granted only by market-origin provenance, by the
++ * reviewed legacy identity, or by built-in origin.
+  */
+ export function verifySkinIntegrity(
+   dir: string,
+@@ -114,67 +183,32 @@
+     }
+   }
+ 
+-  let raw: unknown = null
+-  try {
+-    raw = JSON.parse(readFileSync(join(dir, MARKET_PROVENANCE_FILENAME), 'utf8'))
+-  } catch {
+-    raw = null
+-  }
+-
+-  if (typeof raw === 'object' && raw !== null) {
+-    const prov = raw as Record<string, unknown>
+-    if (prov.version === 1 && prov.source === MARKET_PROVENANCE_SOURCE && prov.id === skinId && typeof prov.files === 'object' && prov.files !== null) {
+-      const hashes = prov.files as Record<string, unknown>
+-      const mismatches: string[] = []
+-      const missing: string[] = []
+-      let totalFilesChecked = 0
+-
+-      for (const [rel, expected] of Object.entries(hashes)) {
+-        if (typeof expected !== 'string') continue
+-        totalFilesChecked++
+-        const abs = join(dir, ...rel.split('/'))
+-        const actual = sha256Hex(abs)
+-        if (actual === null) {
+-          missing.push(rel)
+-        } else if (actual !== expected) {
+-          mismatches.push(rel)
+-        }
+-      }
+-
+-      if (missing.length > 0) {
+-        return {
+-          id: skinId,
+-          status: 'missing-files',
+-          hooksTrusted: false,
+-          hasProvenance: true,
+-          mismatches,
+-          missing,
+-          totalFilesChecked,
+-        }
+-      }
+-
+-      if (mismatches.length > 0) {
+-        return {
+-          id: skinId,
+-          status: 'tampered',
+-          hooksTrusted: false,
+-          hasProvenance: true,
+-          mismatches,
+-          missing,
+-          totalFilesChecked,
+-        }
+-      }
+-
++  const prov = parseProvenance(dir, skinId)
++  if (prov !== null) {
++    const checked = checkProvenanceFiles(dir, prov.files)
++    if (checked.failure !== null) {
+       return {
+         id: skinId,
+-        status: 'valid',
+-        hooksTrusted: true,
++        status: checked.failure,
++        hooksTrusted: false,
+         hasProvenance: true,
+-        mismatches: [],
+-        missing: [],
+-        totalFilesChecked,
++        mismatches: checked.mismatches,
++        missing: checked.missing,
++        totalFilesChecked: checked.totalFilesChecked,
+       }
+     }
++    return {
++      id: skinId,
++      status: 'valid',
++      // Only the market origin's byte-pinned provenance makes hooks
++      // executable; a local-origin document (this package's own local
++      // repair) is integrity-valid but never a trust grant.
++      hooksTrusted: prov.source === MARKET_PROVENANCE_SOURCE,
++      hasProvenance: true,
++      mismatches: [],
++      missing: [],
++      totalFilesChecked: checked.totalFilesChecked,
++    }
+   }
+ 
+   // No valid provenance file
+@@ -249,12 +283,170 @@
+   id: string
+   error?: string
+   repairedFiles?: number
++}
++
++/** Marker separating a target path from this module's repair temp-dir suffix. */
++const REPAIR_TEMP_INFIX = '.repair-'
++
++/** mkdtempSync suffix shape (6 random characters) used by active-state's atomic write. */
++const TEMP_NAME_TAIL_RE = /^[A-Za-z0-9]{6}$/
++
++/** Repair temp directories older than an hour are abandoned: every repair either
++ * renames its temp dir into place or sweeps it within seconds, so nothing can
++ * legitimately own a matching directory that old. */
++const STALE_TEMP_AGE_MS = 60 * 60 * 1000
++
++/** Minimum interval between sweeps of the same directory. Sweeping on every
++ * write would add an uncached directory listing to the per-request
++ * active-state write for no benefit: anything the listing could find was
++ * already older than STALE_TEMP_AGE_MS, so at most one sweep per interval is
++ * enough to bound the leak. */
++const TEMP_SWEEP_INTERVAL_MS = 60 * 1000
++
++/** Last sweep time per directory (bounded implicitly by process lifetime). */
++const lastSweepAt = new Map<string, number>()
++
++/**
++ * Stale temp-directory names this package leaves next to a target *if the
++ * process dies mid-write*. A crash skips both modules' finally blocks, so the
++ * next write to the same directory sweeps this module's own leftovers.
++ *
++ * Names must match exactly: this module mints "<target>.repair-<base36>-<6
++ * chars>" (see repairSkinFromMarket), active-state mints
++ * "<target>.tmp-<6 chars>" via mkdtempSync. Matching requires a directory
++ * entry, so a file or symlink is never touched.
++ */
++export interface TempDirSweepPattern {
++  prefix: string
++  tail: (name: string) => boolean
+ }
+ 
++/** Pattern for this module's repair temp directories (market repair path). */
++export function repairTempSweepPattern(destDir: string): TempDirSweepPattern {
++  const prefix = basename(destDir) + REPAIR_TEMP_INFIX
++  return {
++    prefix,
++    tail: (name) => {
++      const parts = name.slice(prefix.length).split('-')
++      return parts.length === 2 && /^[a-z0-9]+$/.test(parts[0] ?? '') && TEMP_NAME_TAIL_RE.test(parts[1] ?? '')
++    },
++  }
++}
++
++/** Pattern for active-state.ts's atomic-write temp directories. */
++export function activeStateTempSweepPattern(targetPath: string): TempDirSweepPattern {
++  const prefix = basename(targetPath) + '.tmp-'
++  return { prefix, tail: (name) => TEMP_NAME_TAIL_RE.test(name.slice(prefix.length)) }
++}
++
+ /**
+- * Repairs a corrupted or tampered skin directory by pulling pristine files
+- * from the local source tree or the official DSH Market and rewriting provenance.
++ * Best-effort sweep of stale sibling temp directories in `dir` that match
++ * `pattern` exactly. Never throws, never recurses, never deletes anything that
++ * does not match, never deletes a directory younger than STALE_TEMP_AGE_MS,
++ * and is safe to call while minting a fresh temp dir because a directory this
++ * call just created cannot be an hour old. `exclude` protects the caller's
++ * current temp dir explicitly. Repeated calls for the same directory are
++ * throttled to TEMP_SWEEP_INTERVAL_MS so this never becomes the hot path.
+  */
++export function sweepStaleTempDirs(
++  dir: string,
++  pattern: TempDirSweepPattern,
++  exclude: string | null = null,
++): void {
++  const now = Date.now()
++  const previous = lastSweepAt.get(dir)
++  if (previous !== undefined && now - previous < TEMP_SWEEP_INTERVAL_MS) return
++  lastSweepAt.set(dir, now)
++  let handle: ReturnType<typeof opendirSync>
++  try {
++    handle = opendirSync(dir)
++  } catch {
++    return
++  }
++  try {
++    for (let entry = handle.readSync(); entry !== null; entry = handle.readSync()) {
++      const name = entry.name
++      if (!name.startsWith(pattern.prefix) || !pattern.tail(name)) continue
++      const abs = join(dir, name)
++      if (abs === exclude) continue
++      try {
++        if (!entry.isDirectory()) continue
++        const st = statSync(abs)
++        if (now - st.mtimeMs < STALE_TEMP_AGE_MS) continue
++        rmSync(abs, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
++      } catch { /* best effort: a concurrent writer or a transient fs error must never break the write */ }
++    }
++  } finally {
++    try {
++      handle.closeSync()
++    } catch { /* best effort */ }
++  }
++}
++
++/** Filesystem errors that a later rename retry can clear (Windows indexer/AV
++ * holds the freshly removed target's entry briefly). Everything else is a real
++ * failure and is rethrown immediately. */
++const TRANSIENT_RENAME_CODES = new Set(['EBUSY', 'EPERM', 'EACCES', 'ENOTEMPTY'])
++
++function isTransientRenameError(err: unknown): boolean {
++  const code = (err as NodeJS.ErrnoException | null)?.code
++  return typeof code === 'string' && TRANSIENT_RENAME_CODES.has(code)
++}
++
++/** Awaitable timer; the non-blocking replacement for a spin loop. */
++function defaultSleep(ms: number): Promise<void> {
++  return new Promise((resolve) => setTimeout(resolve, ms))
++}
++
++export interface RenameRetryOptions {
++  sleep?: (ms: number) => Promise<void>
++  /** Total awaited-backoff budget. */
++  totalMs?: number
++  baseDelayMs?: number
++  /** Injectable rename (tests); defaults to node:fs renameSync. */
++  rename?: (src: string, dest: string) => void
++}
++
++/**
++ * Rename src onto dest, retrying transient failures with an awaited backoff.
++ *
++ * repairSkinFromMarket must replace an existing destination, so it removes
++ * dest and then renames; on Windows the removal can still be settling when the
++ * rename runs, which surfaces as EBUSY/EPERM and clears within milliseconds.
++ * The retry waits on a timer instead of spinning: a synchronous spin blocks
++ * the event loop (this runs inside the host's HTTP request handling) and gives
++ * the filesystem no more time than the loop's duration. Non-transient errors
++ * fail fast, and exhausting the budget rethrows the last transient error so a
++ * persistent failure still cleans up the temp dir and reports an error.
++ */
++export async function renameWithRetry(src: string, dest: string, options: RenameRetryOptions = {}): Promise<void> {
++  const sleep = options.sleep ?? defaultSleep
++  const rename = options.rename ?? renameSync
++  const totalMs = options.totalMs ?? 1_000
++  const baseDelayMs = options.baseDelayMs ?? 10
++  const deadline = Date.now() + totalMs
++  let delay = baseDelayMs
++  for (;;) {
++    try {
++      rename(src, dest)
++      return
++    } catch (err) {
++      if (!isTransientRenameError(err) || Date.now() + delay > deadline) throw err
++      await sleep(delay)
++      delay *= 2
++    }
++  }
++}
++
++/**
++ * Repairs a corrupted or tampered skin directory by copying pristine files
++ * from the local source tree or downloading them from the official DSH Market
++ * and rewriting provenance. The rewritten document names the origin the bytes
++ * actually came from: the market path records the market origin (the only
++ * origin that later makes a user skin's hooks executable), while the local
++ * path records LOCAL_PROVENANCE_SOURCE because bundled or explicitly supplied
++ * bytes never passed through the market.
++ */
+ export async function repairSkinFromMarket(
+   destDir: string,
+   skinId: string,
+@@ -275,6 +467,9 @@
+     if (files.length > 0) {
+       const hashes: Record<string, string> = {}
+       mkdirSync(destDir, { recursive: true })
++      // Crash debris from an earlier repair of this same skin is swept before
++      // a new provenance document is minted.
++      sweepStaleTempDirs(dirname(destDir), repairTempSweepPattern(destDir))
+       for (const rel of files) {
+         const src = join(localDir, ...rel.split('/'))
+         const target = join(destDir, ...rel.split('/'))
+@@ -286,7 +481,10 @@
+       }
+       const provenance = {
+         version: 1,
+-        source: MARKET_PROVENANCE_SOURCE,
++        // Truthful origin: these bytes were copied from a local source, so
++        // they carry no market review claim and the hooks trust gate refuses
++        // them (see verifySkinIntegrity and verifyMarketProvenance).
++        source: LOCAL_PROVENANCE_SOURCE,
+         kind: 'skin',
+         id: skinId,
+         installedAt: new Date().toISOString(),
+@@ -312,8 +510,11 @@
+       return { ok: false, id: skinId, error: 'skin-not-found-on-market' }
+     }
+ 
+-    const tmp = destDir + '.repair-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
++    const tmp = destDir + REPAIR_TEMP_INFIX + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8)
+     mkdirSync(tmp, { recursive: true })
++    // The fresh temp dir is explicitly excluded: it can never be stale, and a
++    // concurrent writer's directory is protected by the age threshold.
++    sweepStaleTempDirs(dirname(destDir), repairTempSweepPattern(destDir), tmp)
+     const hashes: Record<string, string> = {}
+ 
+     try {
+@@ -347,13 +548,10 @@
+       if (existsSync(destDir)) {
+         rmSync(destDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 })
+       }
+-      try {
+-        renameSync(tmp, destDir)
+-      } catch {
+-        const start = Date.now()
+-        while (Date.now() - start < 50) { /* spin */ }
+-        renameSync(tmp, destDir)
+-      }
++      // Awaited retry instead of a synchronous spin: the spin froze the whole
++      // host event loop for up to 50 ms while waiting for the just-removed
++      // destination's directory entry to settle before the rename.
++      await renameWithRetry(tmp, destDir)
+       return { ok: true, id: skinId, repairedFiles: item.files.length }
+     } finally {
+       try {
+--- baseline/src/active-state.ts	2026-10-01 03:37:31
++++ patched/src/active-state.ts	2026-10-01 03:37:31
+@@ -13,6 +13,7 @@
+ import { basename, dirname, join } from 'node:path'
+ 
+ import { normalizeSkinBackground, type SkinBackgroundConfig } from './core/background.ts'
++import { activeStateTempSweepPattern, sweepStaleTempDirs } from './provenance.ts'
+ import { userSkinsDir } from './skin-repo.ts'
+ 
+ /**
+@@ -81,6 +82,12 @@
+   // readActiveState would silently discard. The temp dir is cleaned up on
+   // both success and failure.
+   const tmpDir = mkdtempSync(join(dir, `${basename(path)}.tmp-`))
++  // A crash between mkdtemp and the finally block leaves that temp dir behind
++  // forever; sweep abandoned siblings (only this module's exact temp-name
++  // pattern, only older than the stale threshold) so leak debris cannot
++  // accumulate. Best-effort and synchronous: this write runs per response and
++  // must never await.
++  sweepStaleTempDirs(dir, activeStateTempSweepPattern(path), tmpDir)
+   const tmp = join(tmpDir, basename(path))
+   const document: { active: string | null; background?: SkinBackgroundConfig; initialized: boolean } = {
+     active,
+--- /dev/null	2026-10-01 03:37:32
++++ patched/tests/provenance.spec.ts	2026-10-01 03:37:32
+@@ -0,0 +1,202 @@
++/**
++ * Provenance tests: truthful repair origin (market trust only for market
++ * bytes), abandoned temp-directory sweeping, and the awaited rename retry that
++ * replaced the synchronous spin wait.
++ */
++
++import { createHash } from 'node:crypto'
++import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import { afterEach, beforeEach, describe, expect, it } from 'vitest'
++
++import {
++  LOCAL_PROVENANCE_SOURCE,
++  MARKET_PROVENANCE_FILENAME,
++  MARKET_PROVENANCE_SOURCE,
++  renameWithRetry,
++  repairSkinFromMarket,
++  verifyMarketProvenance,
++  verifySkinIntegrity,
++} from '../src/provenance.ts'
++
++const HOUR_MS = 60 * 60 * 1000
++
++function sha256(text: string | Buffer): string {
++  return createHash('sha256').update(text).digest('hex')
++}
++
++function v2(id: string): Record<string, unknown> {
++  return {
++    skinManifestVersion: 2,
++    id,
++    name: id,
++    nameEn: id,
++    version: '1.0.0',
++    author: 'tester',
++    contributes: { stylesheet: 'skin.css' },
++  }
++}
++
++let root: string
++
++/** A pristine local source tree holding one skin with one stylesheet. */
++function writeLocalSource(id: string): { dir: string; manifest: string; css: string } {
++  const dir = join(root, 'source', id)
++  mkdirSync(dir, { recursive: true })
++  const manifest = JSON.stringify(v2(id), null, 2)
++  const css = '.pristine { color: blue; }'
++  writeFileSync(join(dir, 'skin.json'), manifest)
++  writeFileSync(join(dir, 'skin.css'), css)
++  return { dir, manifest, css }
++}
++
++beforeEach(() => {
++  root = mkdtempSync(join(tmpdir(), 'provenance-'))
++})
++
++afterEach(() => {
++  rmSync(root, { recursive: true, force: true })
++})
++
++describe('repairSkinFromMarket origin', () => {
++  it('records the local origin and refuses hook trust for bytes copied from the bundled tree', async () => {
++    const source = writeLocalSource('local-skin')
++    const dest = join(root, 'user', 'local-skin')
++    const res = await repairSkinFromMarket(dest, 'local-skin', { localSourceDir: source.dir })
++    expect(res.ok).toBe(true)
++
++    const doc = JSON.parse(readFileSync(join(dest, MARKET_PROVENANCE_FILENAME), 'utf8')) as { source: string; id: string }
++    expect(doc.source).toBe(LOCAL_PROVENANCE_SOURCE)
++    expect(doc.id).toBe('local-skin')
++    // The copied bytes are integrity-verifiable, but the document never claims
++    // market review, so the market-only hooks trust gate refuses them.
++    expect(verifySkinIntegrity(dest, 'local-skin')).toEqual({
++      id: 'local-skin',
++      status: 'valid',
++      hooksTrusted: false,
++      hasProvenance: true,
++      mismatches: [],
++      missing: [],
++      totalFilesChecked: 2,
++    })
++    expect(verifyMarketProvenance(dest, 'local-skin', 'hooks.mjs')).toBe(false)
++  })
++
++  it('keeps market provenance (and therefore hook trust) for byte-matching market installs', () => {
++    const source = writeLocalSource('market-skin')
++    const dir = join(root, 'user', 'market-skin')
++    mkdirSync(dir, { recursive: true })
++    writeFileSync(join(dir, 'skin.json'), source.manifest)
++    writeFileSync(join(dir, 'skin.css'), source.css)
++    writeFileSync(join(dir, 'hooks.mjs'), 'export default {}\n')
++    writeFileSync(join(dir, MARKET_PROVENANCE_FILENAME), JSON.stringify({
++      version: 1,
++      source: MARKET_PROVENANCE_SOURCE,
++      kind: 'skin',
++      id: 'market-skin',
++      files: {
++        'skin.json': sha256(source.manifest),
++        'skin.css': sha256(source.css),
++        'hooks.mjs': sha256('export default {}\n'),
++      },
++    }, null, 2))
++
++    expect(verifyMarketProvenance(dir, 'market-skin', 'hooks.mjs')).toBe(true)
++    const report = verifySkinIntegrity(dir, 'market-skin', { hooksEntry: 'hooks.mjs' })
++    expect(report.status).toBe('valid')
++    expect(report.hooksTrusted).toBe(true)
++  })
++
++  it('still detects post-repair tampering of a locally repaired skin', async () => {
++    const source = writeLocalSource('tamper-me')
++    const dest = join(root, 'user', 'tamper-me')
++    expect((await repairSkinFromMarket(dest, 'tamper-me', { localSourceDir: source.dir })).ok).toBe(true)
++
++    writeFileSync(join(dest, 'skin.css'), '.edited { color: red; }')
++    const report = verifySkinIntegrity(dest, 'tamper-me')
++    expect(report.status).toBe('tampered')
++    expect(report.mismatches).toContain('skin.css')
++    expect(report.hooksTrusted).toBe(false)
++  })
++})
++
++describe('stale temp-directory sweeping', () => {
++  it('sweeps an abandoned repair temp dir while repairing from the market', async () => {
++    const source = writeLocalSource('debris-skin')
++    const userDir = join(root, 'user')
++    const dest = join(userDir, 'debris-skin')
++    mkdirSync(userDir, { recursive: true })
++    const stale = join(userDir, 'debris-skin.repair-abc123-zzzzzz')
++    mkdirSync(stale)
++    utimesSync(stale, new Date(Date.now() - 2 * HOUR_MS), new Date(Date.now() - 2 * HOUR_MS))
++
++    const mockFetch = async (url: string | URL): Promise<Response> => {
++      const target = String(url)
++      if (target.endsWith('/manifest/skins.json')) {
++        return new Response(JSON.stringify({ items: [{ id: 'debris-skin', files: ['skin.json', 'skin.css'] }] }), { status: 200 })
++      }
++      const rel = target.endsWith('/skin.json') ? 'skin.json' : 'skin.css'
++      return new Response(readFileSync(join(source.dir, rel)), { status: 200 })
++    }
++
++    const res = await repairSkinFromMarket(dest, 'debris-skin', { fetchImpl: mockFetch as unknown as typeof fetch })
++    expect(res.ok).toBe(true)
++    expect(() => statSync(stale)).toThrow()
++    expect(readFileSync(join(dest, 'skin.css'), 'utf8')).toBe(source.css)
++  })
++})
++
++describe('renameWithRetry', () => {
++  it('retries a transient rename failure with awaited backoff and succeeds', async () => {
++    const sleeps: number[] = []
++    const attempts: number[] = []
++    await renameWithRetry('src', 'dest', {
++      baseDelayMs: 5,
++      sleep: async (ms) => {
++        sleeps.push(ms)
++      },
++      rename: () => {
++        attempts.push(attempts.length + 1)
++        if (attempts.length < 3) {
++          const err = new Error('simulated hold') as NodeJS.ErrnoException
++          err.code = 'EBUSY'
++          throw err
++        }
++      },
++    })
++    expect(attempts).toHaveLength(3)
++    // Awaited, growing backoff: never a synchronous spin.
++    expect(sleeps).toEqual([5, 10])
++  })
++
++  it('rethrows a non-transient rename error without waiting', async () => {
++    const missing = join(root, 'does-not-exist')
++    const dest = join(root, 'never')
++    const sleeps: number[] = []
++    await expect(renameWithRetry(missing, dest, {
++      sleep: async (ms) => {
++        sleeps.push(ms)
++      },
++    })).rejects.toMatchObject({ code: 'ENOENT' })
++    expect(sleeps).toEqual([])
++  })
++
++  it('gives up after the backoff budget and rethrows the last transient error', async () => {
++    const sleeps: number[] = []
++    await expect(renameWithRetry('src', 'dest', {
++      totalMs: 0,
++      baseDelayMs: 5,
++      sleep: async (ms) => {
++        sleeps.push(ms)
++      },
++      rename: () => {
++        const err = new Error('never settles') as NodeJS.ErrnoException
++        err.code = 'EBUSY'
++        throw err
++      },
++    })).rejects.toMatchObject({ code: 'EBUSY' })
++    expect(sleeps).toEqual([])
++  })
++})
+--- baseline/tests/active-state.spec.ts	2026-10-01 03:37:32
++++ patched/tests/active-state.spec.ts	2026-10-01 03:37:32
+@@ -1,10 +1,12 @@
+-import { mkdtempSync, readFileSync, readdirSync, renameSync } from 'node:fs'
++import { mkdtempSync, readFileSync, readdirSync, renameSync, statSync, utimesSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { join } from 'node:path'
+ import { beforeEach, describe, expect, it, vi } from 'vitest'
+ 
+ import { DEFAULT_SKIN_ID, readActiveSelection, readActiveState, seedDefaultActiveSkin, writeActiveSelection, writeActiveState } from '../src/active-state.ts'
+ 
++const HOUR_MS = 60 * 60 * 1000
++
+ const { originalRename } = vi.hoisted(() => ({
+   originalRename: { impl: null as unknown as typeof renameSync },
+ }))
+@@ -53,6 +55,33 @@
+     expect(readdirSync(dir)).toEqual(['skin-center-active.json'])
+   })
+ 
++  it('sweeps abandoned atomic-write temp directories from a crashed process', () => {
++    // Exactly the shape mkdtempSync produced before the crash: mkdtempSync
++    // appends 6 random characters to "<target>.tmp-".
++    const stale = mkdtempSync(join(dir, 'skin-center-active.json.tmp-'))
++    const old = new Date(Date.now() - 2 * HOUR_MS)
++    utimesSync(stale, old, old)
++    const unrelated = mkdtempSync(join(dir, 'other-skin.json.tmp-'))
++    utimesSync(unrelated, old, old)
++    const otherModuleDebris = mkdtempSync(join(dir, 'skin-center-active.json.repair-abc123-'))
++    utimesSync(otherModuleDebris, old, old)
++
++    writeActiveSelection(path, 'skin-a')
++
++    expect(() => statSync(stale)).toThrow()
++    // Only this module's exact temp-name pattern is swept.
++    expect(statSync(unrelated).isDirectory()).toBe(true)
++    expect(statSync(otherModuleDebris).isDirectory()).toBe(true)
++    expect(readActiveSelection(path)).toBe('skin-a')
++  })
++
++  it('never sweeps a recent temp directory that may belong to a concurrent write', () => {
++    const recent = mkdtempSync(join(dir, 'skin-center-active.json.tmp-'))
++    writeActiveSelection(path, 'skin-a')
++    expect(statSync(recent).isDirectory()).toBe(true)
++    expect(readActiveSelection(path)).toBe('skin-a')
++  })
++
+   it('seeds the default shipped skin on a first boot with no selection', () => {
+     expect(seedDefaultActiveSkin(path, () => true)).toBe(true)
+     expect(readActiveSelection(path)).toBe(DEFAULT_SKIN_ID)

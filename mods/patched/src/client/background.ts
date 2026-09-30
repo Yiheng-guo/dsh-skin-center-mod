@@ -34,6 +34,10 @@ import {
   SKIN_BACKGROUND_DEFAULTS,
   type SkinBackgroundConfig,
 } from '../core/background.ts'
+import {
+  ACTIVE_CONVERSATION_CONTENT_SELECTOR,
+  COMPOSER_FROST_BLUR_VAR,
+} from './runtime/backdrop-scene.ts'
 
 /** The namespace string the Host registers (mirrors src/index.ts). */
 export const SKIN_BACKGROUND_NS = 'skin-background'
@@ -65,8 +69,12 @@ export const BUBBLE_BLUR_FIELD = 'bubbleBlur'
 /** CSS custom property consumed by skins that expose a bubble backdrop blur. */
 export const BUBBLE_BLUR_VAR = '--dsh-skin-bubble-blur'
 
-/** CSS custom property consumed by the shared composer neutralizer. */
-export const INPUT_CARD_BLUR_VAR = '--dsh-input-card-blur'
+/**
+ * CSS custom property consumed by the shared composer frost follower.
+ * The name lives in backdrop-scene.ts, the layer that reads it, so the writer
+ * and the reader cannot drift apart.
+ */
+export const INPUT_CARD_BLUR_VAR = COMPOSER_FROST_BLUR_VAR
 
 /** Default occlusion (0 = no extra veil) when the section carries none. */
 export const DEFAULT_OPACITY = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
@@ -115,22 +123,6 @@ export interface SkinBackgroundHandle {
   /** Tear down the blur element and MutationObserver. */
   dispose(): void
 }
-
-/**
- * Selector for a conversation message row inside the shell's center column.
- * Official shell message rows carry `data-chat-anchor-key`; the
- * `data-pane="conversation"` attribute is stamped by the dsh-web-all compat
- * shim on the center column, where the _userRow / _compactionRow /
- * _contextRow / _turnErrorRow suffixes are CSS-module message-row classes
- * (hash prefix varies, suffix is stable).
- */
-const CONVERSATION_CONTENT_SELECTOR = [
-  '[data-chat-anchor-key]',
-  '[data-pane="conversation"] [class*="_userRow"]',
-  '[data-pane="conversation"] [class*="_compactionRow"]',
-  '[data-pane="conversation"] [class*="_contextRow"]',
-  '[data-pane="conversation"] [class*="_turnErrorRow"]',
-].join(', ')
 
 /**
  * Own the background preference set: apply the values to the body instantly
@@ -388,9 +380,14 @@ export class BackgroundController implements SkinBackgroundHandle {
     else this.removeBlurElement()
   }
 
-  /** True when the conversation pane hosts at least one message row. */
+  /**
+   * True when the conversation pane hosts at least one message row. Uses the
+   * shared scrollport-scoped selector from backdrop-scene.ts: this layer's
+   * empty/with-content switch and the composer frost gate must agree, and a
+   * bare anchor query counts stale topic-picker rows as content here only.
+   */
   private hasConversationContent(): boolean {
-    return document.querySelector(CONVERSATION_CONTENT_SELECTOR) !== null
+    return document.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR) !== null
   }
 
   /** True while a Wallpaper Engine wallpaper is mounted. */

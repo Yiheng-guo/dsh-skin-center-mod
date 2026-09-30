@@ -1,6 +1,55 @@
---- baseline/src/client/background.ts	2026-10-01 01:58:12
-+++ patched/src/client/background.ts	2026-10-01 02:04:46
-@@ -150,6 +150,15 @@
+--- baseline/src/client/background.ts	2026-10-01 03:37:31
++++ patched/src/client/background.ts	2026-10-01 03:37:31
+@@ -34,6 +34,10 @@
+   SKIN_BACKGROUND_DEFAULTS,
+   type SkinBackgroundConfig,
+ } from '../core/background.ts'
++import {
++  ACTIVE_CONVERSATION_CONTENT_SELECTOR,
++  COMPOSER_FROST_BLUR_VAR,
++} from './runtime/backdrop-scene.ts'
+ 
+ /** The namespace string the Host registers (mirrors src/index.ts). */
+ export const SKIN_BACKGROUND_NS = 'skin-background'
+@@ -65,8 +69,12 @@
+ /** CSS custom property consumed by skins that expose a bubble backdrop blur. */
+ export const BUBBLE_BLUR_VAR = '--dsh-skin-bubble-blur'
+ 
+-/** CSS custom property consumed by the shared composer neutralizer. */
+-export const INPUT_CARD_BLUR_VAR = '--dsh-input-card-blur'
++/**
++ * CSS custom property consumed by the shared composer frost follower.
++ * The name lives in backdrop-scene.ts, the layer that reads it, so the writer
++ * and the reader cannot drift apart.
++ */
++export const INPUT_CARD_BLUR_VAR = COMPOSER_FROST_BLUR_VAR
+ 
+ /** Default occlusion (0 = no extra veil) when the section carries none. */
+ export const DEFAULT_OPACITY = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
+@@ -115,22 +123,6 @@
+   /** Tear down the blur element and MutationObserver. */
+   dispose(): void
+ }
+-
+-/**
+- * Selector for a conversation message row inside the shell's center column.
+- * Official shell message rows carry `data-chat-anchor-key`; the
+- * `data-pane="conversation"` attribute is stamped by the dsh-web-all compat
+- * shim on the center column, where the _userRow / _compactionRow /
+- * _contextRow / _turnErrorRow suffixes are CSS-module message-row classes
+- * (hash prefix varies, suffix is stable).
+- */
+-const CONVERSATION_CONTENT_SELECTOR = [
+-  '[data-chat-anchor-key]',
+-  '[data-pane="conversation"] [class*="_userRow"]',
+-  '[data-pane="conversation"] [class*="_compactionRow"]',
+-  '[data-pane="conversation"] [class*="_contextRow"]',
+-  '[data-pane="conversation"] [class*="_turnErrorRow"]',
+-].join(', ')
+ 
+ /**
+  * Own the background preference set: apply the values to the body instantly
+@@ -150,6 +142,15 @@
    private blurElement: HTMLDivElement | null = null
    /** Currently applied backdrop-filter blur px (cached to avoid redundant style writes during streaming). */
    private appliedBlur: number | null = null
@@ -16,7 +65,7 @@
    /** The body MutationObserver, installed lazily once a blur is active. */
    private observer: MutationObserver | null = null
    /** Pending requestAnimationFrame id for a coalesced recheck. */
-@@ -283,6 +292,8 @@
+@@ -283,6 +284,8 @@
        this.rafId = null
      }
      this.removeBlurElement()
@@ -25,7 +74,7 @@
      document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
      document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
      document.body.style.removeProperty(BUBBLE_BLUR_VAR)
-@@ -336,13 +347,17 @@
+@@ -336,13 +339,17 @@
      document.body.style.setProperty(BUBBLE_BLUR_VAR, this.bubbleBlurValue + 'px')
    }
  
@@ -46,7 +95,7 @@
    }
  
    /**
-@@ -352,6 +367,10 @@
+@@ -352,6 +359,10 @@
     */
    private syncBlur(): void {
      if (this.disposed) return
@@ -57,7 +106,24 @@
      if (this.hasWallpaper()) {
        // The wallpaper module owns its own blur (wallpaperBlur); the skin-center
        // background blur layer must stay off while a wallpaper is mounted so
-@@ -388,6 +407,7 @@
+@@ -369,9 +380,14 @@
+     else this.removeBlurElement()
+   }
+ 
+-  /** True when the conversation pane hosts at least one message row. */
++  /**
++   * True when the conversation pane hosts at least one message row. Uses the
++   * shared scrollport-scoped selector from backdrop-scene.ts: this layer's
++   * empty/with-content switch and the composer frost gate must agree, and a
++   * bare anchor query counts stale topic-picker rows as content here only.
++   */
+   private hasConversationContent(): boolean {
+-    return document.querySelector(CONVERSATION_CONTENT_SELECTOR) !== null
++    return document.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR) !== null
+   }
+ 
+   /** True while a Wallpaper Engine wallpaper is mounted. */
+@@ -388,6 +404,7 @@
        element.style.zIndex = '-1'
        element.style.pointerEvents = 'none'
        element.setAttribute('aria-hidden', 'true')
@@ -65,12 +131,10 @@
        this.blurElement = element
        document.body.appendChild(element)
        this.appliedBlur = null
-@@ -398,8 +418,54 @@
-     this.blurElement.style.backdropFilter = blur
-     // Safari: the vendor-prefixed form is only reachable via setProperty.
+@@ -400,6 +417,52 @@
      this.blurElement.style.setProperty('-webkit-backdrop-filter', blur)
-+  }
-+
+   }
+ 
 +  /**
 +   * Apply the occlusion veil. Mirrors {@link syncBlur}: off under the master
 +   * switch, off while a wallpaper owns the background (the wallpaper module
@@ -83,8 +147,8 @@
 +      return
 +    }
 +    this.ensureScrimElement(this.opacityValue / 100)
-   }
- 
++  }
++
 +  /** Create (if needed) and paint the fixed occlusion veil. */
 +  private ensureScrimElement(active: number): void {
 +    if (this.scrimElement === null) {

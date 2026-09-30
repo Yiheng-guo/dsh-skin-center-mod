@@ -1,5 +1,5 @@
---- baseline/src/index.ts	2026-10-01 03:23:46
-+++ patched/src/index.ts	2026-10-01 03:23:46
+--- baseline/src/index.ts	2026-10-01 03:37:31
++++ patched/src/index.ts	2026-10-01 03:37:31
 @@ -354,24 +354,18 @@
      console.error('[ui-skin-center] route registration failed:', error)
    }

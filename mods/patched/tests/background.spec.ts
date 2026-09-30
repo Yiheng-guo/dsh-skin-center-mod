@@ -15,6 +15,7 @@ import {
   SCRIM_VAR,
   INPUT_CARD_BLUR_VAR,
 } from '../src/client/background.ts'
+import { ACTIVE_CONVERSATION_CONTENT_SELECTOR } from '../src/client/runtime/backdrop-scene.ts'
 
 /** A recording persist callback plus the controller built over it. */
 function rig(initial: SkinBackgroundConfig | null = null): {
@@ -57,14 +58,23 @@ function addConversationRow(): void {
   document.body.appendChild(pane)
 }
 
+/**
+ * Wrap one official-shell message row (no compat `data-pane` shim) in the
+ * conversation scrollport: the shared content selector scopes the bare
+ * `data-chat-anchor-key` form to the active scrollport.
+ */
 function addOfficialConversationRow(): void {
+  const scrollport = document.createElement('div')
+  scrollport.setAttribute('data-conversation-scroll', '')
   const row = document.createElement('div')
   row.setAttribute('data-chat-anchor-key', 'turn-1')
-  document.body.appendChild(row)
+  scrollport.appendChild(row)
+  document.body.appendChild(scrollport)
 }
 
 function removeConversationRow(): void {
   document.body.querySelectorAll('[data-pane="conversation"]').forEach(node => node.remove())
+  document.body.querySelectorAll('[data-conversation-scroll]').forEach(node => node.remove())
   document.body.querySelectorAll('[data-chat-anchor-key]').forEach(node => node.remove())
 }
 
@@ -162,6 +172,29 @@ describe('BackgroundController', () => {
     const { controller } = rig({ backgroundBlurEmpty: 2, backgroundBlurContent: 10 })
     expect(blurElement()!.style.backdropFilter).toContain('blur(2px)')
     addOfficialConversationRow()
+    await flush()
+    expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
+    controller.dispose()
+  })
+
+  it('ignores a stale topic-picker row outside the active scrollport (shared selector)', async () => {
+    const { controller } = rig({ backgroundBlurEmpty: 2, backgroundBlurContent: 10 })
+    expect(blurElement()!.style.backdropFilter).toContain('blur(2px)')
+    // A topic picker retains its own anchor node while the new topic mounts.
+    // The private bare-attribute query this controller used to carry counted
+    // that stale row as content and flipped to the with-content strength while
+    // the composer frost gate still saw an empty conversation.
+    const staleRow = document.createElement('div')
+    staleRow.setAttribute('data-chat-anchor-key', 'stale-topic-row')
+    document.body.appendChild(staleRow)
+    expect(document.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR)).toBeNull()
+    await flush()
+    expect(blurElement()!.style.backdropFilter).toContain('blur(2px)')
+    // The same row inside the active scrollport is conversation content.
+    const scrollport = document.createElement('div')
+    scrollport.setAttribute('data-conversation-scroll', '')
+    document.body.appendChild(scrollport)
+    scrollport.appendChild(staleRow)
     await flush()
     expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
     controller.dispose()
