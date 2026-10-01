@@ -1,54 +1,75 @@
-# dsh-skin-center-mod
+# DSH 皮肤 · 赛博少女 / 深蓝深渊
 
-一个 **DSH Web GUI 皮肤中心（`@linxin666/dsh-client-ui-skin-center`）的魔改 fork**：
-修掉一处「滑杆是死的」结构性错位，给循环视频背景补上生命周期与无障碍策略，
-外加两款原创皮肤和一套烤循环/校验/预览的工具链。
+给 **DeepSeek 桌面端（DSH）** 换皮用的两款深色赛博风皮肤，以及把它们做出来的一整套工具。
 
-上游：[`zhu1090093659/dsh-skins`](https://github.com/zhu1090093659/dsh-skins) · fork 自 **v0.4.4** · 许可与归属见 [`NOTICE.md`](NOTICE.md)
+**这个仓库是干嘛的**：DSH 的界面默认很素。我做了两款皮肤换掉它——画面是**自己剪的无缝循环视频**，
+配深色玻璃质感的界面。做皮肤的过程中把上游皮肤中心插件也读了一遍，顺手修了 20 多个 bug，
+所以仓库里既有**能直接用的皮肤**，也有**补丁和工具链**。
+
+只想用皮肤的话，看完下面「装它」两步就可以关掉页面了。
 
 ---
 
-## 只想装皮肤、不想看代码？三步
+## 两款皮肤
 
-**1. 先有 DSH 和皮肤中心**
+| 预览 | 皮肤 |
+|---|---|
+| <img src="skins/cyber-maiden/preview/dark.jpg" width="480" alt="赛博少女"> | **赛博少女 · 冷钢之夜**<br>`cyber-maiden`<br>深夜蓝 · 冷钢蓝灰 · 全息玻璃 · 循环视频背景<br><br>作者：Yiheng-guo |
+| <img src="skins/cyber-abyss/preview/dark.jpg" width="480" alt="深蓝深渊"> | **深蓝深渊 · 数据流**<br>`cyber-abyss`<br>深海蓝 · 电光青 · 放射数据流 · 循环视频背景<br><br>作者：Yiheng-guo |
 
-装好 DeepSeek 桌面端（DSH），再装上游的皮肤中心插件
-[`@linxin666/dsh-client-ui-skin-center`](https://github.com/zhu1090093659/dsh-skins)。
+两款皮肤的画面素材**都是我自己剪的视频**，并且做了**无缝循环**——首尾帧对齐，可以无限播放不跳帧
+（实测首帧/末帧 PSNR 39.3 dB / 39.9 dB）。
 
-**2. 把皮肤目录拷进去**
+每款皮肤的目录里还有它自己的 `README.md` 和亮色/暗色两张预览图。
+
+---
+
+## 装它（两步）
 
 ```sh
 git clone https://github.com/Yiheng-guo/dsh-skin-center-mod
-cp -r dsh-skin-center-mod/skins/cyber-maiden ~/.dsh/skins/
-cp -r dsh-skin-center-mod/skins/cyber-abyss  ~/.dsh/skins/
+cp -r dsh-skin-center-mod/skins/cyber-maiden \
+      dsh-skin-center-mod/skins/cyber-abyss ~/.dsh/skins/
 ```
 
+然后**重开 DSH** → 设置 → 皮肤中心 → 选一款。完事。
+
+**前提**：先装好 DSH，再装上游的皮肤中心插件
+[`zhu1090093659/dsh-skins`](https://github.com/zhu1090093659/dsh-skins)。
+
 `~/.dsh/skins/` 是 DSH 的用户皮肤目录。两款皮肤一共约 6 MB，**无缝循环视频已经包含在内**，
-不需要另外准备素材。
-
-**3. 重开 DSH，设置 → 皮肤中心，选一款**
-
-觉得背景太抢，就在同一张卡片里调**模糊**和**遮蔽**两个滑杆，实时生效。
-
-皮肤还可以自带一套推荐背景值：写在自己目录下的 `tuning.json` 里。
-**这是一个侧车文件，不改 `skin.json` 的格式**——因为 v2 清单是
-`additionalProperties: false`，往里加字段会让**官方插件直接拒绝这款皮肤**。
-用侧车文件，官方插件完全不认识它，皮肤在两边都能装。
-
-> **下面这些命令行要打了本仓库的补丁才有**，官方插件只带 `validate / install / use / list / current`：
->
-> ```sh
-> dsh-skin bg get       # 看当前背景参数，并标出哪些是你显式改过的（区分「设成 0」和「没设过」）
-> dsh-skin bg set --occlusion 45 --blur 18/12
-> dsh-skin bg reset     # 清掉你的覆盖，回到当前皮肤的推荐值
-> dsh-skin doctor       # 只打印有问题的地方：被排除的皮肤、警告、选中项已失效
-> ```
+不用另外准备素材。
 
 ---
 
-## 给开发者
+## 丢给自己 agent 的一句话
 
-这一节往下是补丁、缺陷分析和工具链。
+把下面这段直接粘给你的 agent：
+
+> 从 `https://github.com/Yiheng-guo/dsh-skin-center-mod` 克隆这个仓库，
+> 然后把 `skins/` 下的两个目录（`cyber-maiden`、`cyber-abyss`）**整体**复制到 `~/.dsh/skins/`。
+> 皮肤是**纯资源目录**（`skin.json` + CSS + 视频 + 预览图），**不执行任何代码**，复制即安装。
+> 复制完让我重启 DSH，然后在 设置 → 皮肤中心 里选中。
+
+补充给 agent 的背景（如果它需要）：皮肤目录里可以放一个可选的 `tuning.json` 侧车文件，
+用来声明该皮肤推荐的背景模糊/遮蔽值。**它不是 `skin.json` 的字段**——v2 清单是
+`additionalProperties: false`，往清单里加字段会让官方插件**拒绝这款皮肤**；
+用侧车文件则两边都能装。
+
+---
+
+## 这个仓库还有什么
+
+以上是「用」。以下是「怎么做的」——只想用皮肤的话到此为止就够了。
+
+| 目录 / 文件 | 内容 |
+|---|---|
+| `skins/` | 两款皮肤本体（无缝循环视频 + 预览图 + 各自的 README） |
+| `mods/` | **14 个补丁**，修了上游插件 20 多个 bug。每个补丁都带**原始基线文件**，可直接 `patch -p1` |
+| `tools/` | 制作工具链：烤无缝循环、生成 CSS、跑上游校验、**对比度审计** |
+| `MODDING-REPORT.md` | 完整缺陷分析——每条都带**文件行号和证据** |
+| `NOTICE.md` | 许可与出处（上游是 BSD-3-Clause） |
+| `docs/` | 皮肤与循环视频的制作说明 |
 
 ---
 
