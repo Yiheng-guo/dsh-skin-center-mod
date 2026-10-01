@@ -1,5 +1,5 @@
---- baseline/src/client/runtime/decoration-layers.ts	2026-10-01 12:49:13
-+++ patched/src/client/runtime/decoration-layers.ts	2026-10-01 12:49:13
+--- baseline/src/client/runtime/decoration-layers.ts	2026-10-01 12:52:42
++++ patched/src/client/runtime/decoration-layers.ts	2026-10-01 12:52:42
 @@ -107,9 +107,89 @@
    }
  }

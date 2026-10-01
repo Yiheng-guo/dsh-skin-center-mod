@@ -1,0 +1,386 @@
+/**
+ * Skin-center locale dictionaries. The plugin-card name, its description,
+ * and every control of the in-GUI skin center is localized through the
+ * standard `t` seat.
+ */
+
+/** Copy keys owned by this plugin. */
+export type SkinCenterKey =
+  | 'title'
+  | 'cardDescription'
+  | 'enabled'
+  | 'enabledHint'
+  | 'offNote'
+  | 'intro'
+  | 'official'
+  | 'officialTagline'
+  | 'active'
+  | 'tryingOn'
+  | 'tryOn'
+  | 'loading'
+  | 'exitTryOn'
+  | 'apply'
+  | 'applying'
+  | 'restore'
+  | 'applyFailed'
+  | 'appliedUnconfirmed'
+  | 'appliedNeedRestart'
+  | 'theme'
+  | 'themeLight'
+  | 'themeDark'
+  | 'tryOnError'
+  | 'backgroundOpacity'
+  | 'backgroundBlurEmpty'
+  | 'backgroundBlurContent'
+  | 'inputCardBlur'
+  | 'inputCardBlurHint'
+  | 'bubbleOpacity'
+  | 'bubbleOpacityHint'
+  | 'bubbleBlur'
+  | 'bubbleBlurHint'
+  | 'backgroundBlurHint'
+  | 'backgroundBlurInert'
+  | 'backgroundHint'
+  | 'backgroundHintInert'
+  | 'wallpaperTitle'
+  | 'wallpaperEnable'
+  | 'wallpaperHint'
+  | 'wallpaperLoadError'
+  | 'wallpaperLibraryFound'
+  | 'wallpaperLibraryManual'
+  | 'wallpaperRefresh'
+  | 'wallpaperMode'
+  | 'wallpaperModeLive'
+  | 'wallpaperModeFrame'
+  | 'wallpaperFit'
+  | 'wallpaperFitCover'
+  | 'wallpaperFitContain'
+  | 'wallpaperFitFill'
+  | 'wallpaperClear'
+  | 'wallpaperDim'
+  | 'wallpaperOpacity'
+  | 'wallpaperBlur'
+  | 'wallpaperPauseHidden'
+  | 'wallpaperSound'
+  | 'wallpaperSoundHint'
+  | 'wallpaperVolume'
+  | 'wallpaperImport'
+  | 'wallpaperImportHint'
+  | 'wallpaperReimport'
+  | 'wallpaperRemove'
+  | 'wallpaperUpdateAvailable'
+  | 'wallpaperEmpty'
+  | 'wallpaperTypeVideo'
+  | 'wallpaperTypeWeb'
+  | 'wallpaperTypeScene'
+  | 'wallpaperTypeApp'
+  | 'wallpaperLoadMore'
+  | 'wallpaperDirs'
+  | 'wallpaperDirsEmpty'
+  | 'wallpaperDirsHint'
+  | 'wallpaperDirPlaceholder'
+  | 'wallpaperDirAdd'
+  | 'wallpaperDirBrowse'
+  | 'wallpaperDirBrowseHint'
+  | 'wallpaperDirBrowseFailed'
+  | 'wallpaperDirBrowseTitle'
+  | 'wallpaperDirBrowseChoose'
+  | 'wallpaperDirBrowseEmpty'
+  | 'wallpaperDirBrowseHidden'
+  | 'wallpaperDirBrowseTruncated'
+  | 'wallpaperSaveFailed'
+  | 'wallpaperRatingAll'
+  | 'wallpaperRatingG'
+  | 'wallpaperRatingPg13'
+  | 'wallpaperRatingR18'
+  | 'wallpaperPagePrev'
+  | 'wallpaperPageNext'
+  | 'wallpaperPageJump'
+  | 'wallpaperPageTotal'
+  | 'customThemeTitle'
+  | 'customThemeTagline'
+  | 'customThemeEdit'
+  | 'customThemeCloseEdit'
+  | 'customThemeMode'
+  | 'customThemeLight'
+  | 'customThemeDark'
+  | 'customThemeAccent'
+  | 'customThemeBackground'
+  | 'customThemeForeground'
+  | 'customThemeContrast'
+  | 'customThemeReset'
+  | 'customThemeResetHint'
+  | 'customThemeSaveFailed'
+  | 'uninstall'
+  | 'uninstalling'
+  | 'uninstallConfirm'
+  | 'uninstallFailed'
+  | 'verifyIntegrity'
+  | 'verifyingIntegrity'
+  | 'verifyAllPassed'
+  | 'verifyFoundIssues'
+  | 'integrityValid'
+  | 'integrityTampered'
+  | 'integrityMissing'
+  | 'integrityHooksRefused'
+  | 'cancel'
+  | 'confirm'
+  | 'verifyRepaired'
+  | 'verifyRepairFailed'
+  | 'repair'
+  | 'repairing'
+  | 'repaired'
+
+export const en: Record<SkinCenterKey, string> = {
+  title: 'Skin Center',
+  cardDescription: 'Try on any installed skin live in the GUI — exit restores instantly, applying persists in one click.',
+  enabled: 'Enable skin center',
+  enabledHint: 'When off, try-on, apply and background controls are disabled; turn it back on to resume.',
+  offNote: 'The skin center is turned off.',
+  intro: 'Try on any skin live — it takes effect instantly, exit restores the current look. Apply persists it across restarts.',
+  official: 'Official default',
+  officialTagline: 'The stock DSH look with no skin applied.',
+  active: 'Active',
+  tryingOn: 'Trying on',
+  tryOn: 'Try on',
+  loading: 'Loading…',
+  exitTryOn: 'Exit try-on',
+  apply: 'Apply',
+  applying: 'Applying…',
+  restore: 'Restore',
+  applyFailed: 'Apply failed',
+  appliedUnconfirmed: 'Applied, but the change has not been confirmed — refresh the page in dev mode; packaged installs (DSH Desktop) need an app restart',
+  appliedNeedRestart: 'Applied and confirmed, but the host did not hot-reload — restart dsh to take effect',
+  theme: 'Theme preview',
+  themeLight: 'Light',
+  themeDark: 'Dark',
+  tryOnError: 'Try-on failed — see console',
+  backgroundOpacity: 'Background occlusion',
+  backgroundBlurEmpty: 'Blur when empty',
+  backgroundBlurContent: 'Blur with content',
+  inputCardBlur: 'Input card blur',
+  inputCardBlurHint: 'Blurs only the area behind the input card while backdrop art is visible; it does not blur the entire wallpaper.',
+  bubbleOpacity: 'Bubble opacity',
+  bubbleOpacityHint: 'Controls translucent message bubbles for skins that expose bubble alpha, such as Whale Mom.',
+  bubbleBlur: 'Bubble blur',
+  bubbleBlurHint: 'Blurs the backdrop behind translucent message bubbles; independent of bubble opacity, 0 disables.',
+  backgroundBlurHint: 'Applies a separate Gaussian blur to the backdrop for the empty conversation and the conversation with content; 0 disables.',
+  backgroundBlurInert: 'Visible only with skins that paint a backdrop; the official default has none.',
+  backgroundHint: 'Instantly veils the backdrop behind the panels — higher values obscure the art to help you focus.',
+  backgroundHintInert: 'Only applies to skins that paint a backdrop (Blue Fantasy / Whale Song). Applies to the official default automatically once such a skin is active.',
+  wallpaperTitle: 'Wallpaper Engine',
+  wallpaperEnable: 'Enable wallpapers',
+  wallpaperHint: 'Use your local Wallpaper Engine library as the GUI backdrop: video, web, and scene wallpapers render live (scene wallpapers need WebGL). On macOS there is no Wallpaper Engine library, so the feature starts off — turn it on, then add a folder of videos.',
+  wallpaperLoadError: 'Wallpaper library failed to load',
+  wallpaperLibraryFound: 'Wallpaper Engine library detected',
+  wallpaperLibraryManual: 'Folders you added',
+  wallpaperRefresh: 'Refresh',
+  wallpaperMode: 'Render mode',
+  wallpaperModeLive: 'Live',
+  wallpaperModeFrame: 'Static frame',
+  wallpaperFit: 'Sizing mode',
+  wallpaperFitCover: 'Cover (fill)',
+  wallpaperFitContain: 'Fit (entire image)',
+  wallpaperFitFill: 'Stretch',
+  wallpaperClear: 'Turn off wallpaper',
+  wallpaperDim: 'Wallpaper dimming',
+  wallpaperOpacity: 'Wallpaper opacity',
+  wallpaperBlur: 'Wallpaper blur',
+  wallpaperPauseHidden: 'Pause when window hidden',
+  wallpaperSound: 'Wallpaper sound',
+  wallpaperSoundHint: 'Play video wallpaper audio. The browser may keep it silent until you click or press a key once.',
+  wallpaperVolume: 'Wallpaper volume',
+  wallpaperImport: 'Import',
+  wallpaperImportHint: 'Copy this wallpaper into local storage, so it keeps working even if the Steam library moves or changes',
+  wallpaperReimport: 'Update',
+  wallpaperRemove: 'Remove',
+  wallpaperUpdateAvailable: 'The workshop original changed since import — update the local copy',
+  wallpaperEmpty: 'No wallpapers found. Add a folder of videos below, or subscribe in the Wallpaper Engine workshop on Windows.',
+  wallpaperTypeVideo: 'Video',
+  wallpaperTypeWeb: 'Web',
+  wallpaperTypeScene: 'Scene (static)',
+  wallpaperTypeApp: 'Unsupported',
+  wallpaperLoadMore: 'Load more',
+  wallpaperDirs: 'Manual folders',
+  wallpaperDirsEmpty: 'No folders yet — add one to load its videos.',
+  wallpaperDirsHint: 'On macOS: pick a folder of .mp4/.webm videos (or a wallpaper project folder). On Windows, folders extend the auto-detected Wallpaper Engine library.',
+  wallpaperDirPlaceholder: '/path/to/wallpapers or ~/Movies/wallpapers',
+  wallpaperDirAdd: 'Add',
+  wallpaperDirBrowse: 'Browse…',
+  wallpaperDirBrowseHint: 'Pick a folder with the system file manager (Finder / Explorer)',
+  wallpaperDirBrowseFailed: 'Could not open the system folder picker — type the path manually instead',
+  wallpaperDirBrowseTitle: 'Select a folder',
+  wallpaperDirBrowseChoose: 'Use this folder',
+  wallpaperDirBrowseEmpty: 'No subfolders',
+  wallpaperDirBrowseHidden: 'Show hidden folders',
+  wallpaperDirBrowseTruncated: 'Too many folders to list; only the beginning is shown.',
+  wallpaperSaveFailed: 'Could not save wallpaper settings.',
+  wallpaperRatingAll: 'All',
+  wallpaperRatingG: 'G',
+  wallpaperRatingPg13: 'PG-13',
+  wallpaperRatingR18: 'R18',
+  wallpaperPagePrev: 'Previous',
+  wallpaperPageNext: 'Next',
+  wallpaperPageJump: 'Go',
+  wallpaperPageTotal: 'Page {page} / {total}',
+  customThemeTitle: 'Custom theme',
+  customThemeTagline: 'A separately saved palette derived from the official default theme.',
+  customThemeEdit: 'Edit',
+  customThemeCloseEdit: 'Collapse',
+  customThemeMode: 'Editing mode',
+  customThemeLight: 'Light',
+  customThemeDark: 'Dark',
+  customThemeAccent: 'Accent',
+  customThemeBackground: 'Background',
+  customThemeForeground: 'Foreground',
+  customThemeContrast: 'Contrast',
+  customThemeReset: 'Restore current mode default',
+  customThemeResetHint: 'Only resets the selected light or dark profile.',
+  customThemeSaveFailed: 'Could not save custom theme changes.',
+  uninstall: 'Uninstall',
+  uninstalling: 'Uninstalling…',
+  uninstallConfirm: 'Are you sure you want to uninstall "{name}"? Local files will be deleted.',
+  uninstallFailed: 'Uninstall failed',
+  verifyIntegrity: 'Verify integrity',
+  verifyingIntegrity: 'Verifying…',
+  verifyAllPassed: 'All {count} installed skin(s) passed integrity verification',
+  verifyFoundIssues: 'Found {count} skin(s) with integrity issues',
+  integrityValid: 'Verified',
+  integrityTampered: 'Modified',
+  integrityMissing: 'Missing files',
+  integrityHooksRefused: 'Hooks refused',
+  cancel: 'Cancel',
+  confirm: 'Confirm',
+  verifyRepaired: 'Successfully repaired {count} skin(s) with integrity issues',
+  verifyRepairFailed: 'Failed to repair {count} skin(s)',
+  repair: 'Repair',
+  repairing: 'Repairing…',
+  repaired: 'Repaired',
+}
+
+export const zh: Record<SkinCenterKey, string> = {
+  title: '皮肤',
+  cardDescription: '在 GUI 内即时试穿任意皮肤，退出即完全还原；应用一键完成并自动刷新。',
+  enabled: '启用皮肤中心',
+  enabledHint: '关闭后停用试穿、应用与背景控件，重新打开即恢复。',
+  offNote: '皮肤中心已关闭。',
+  intro: '任意皮肤可即时试穿，退出即完全还原；「应用」一键持久化，页面自动刷新生效。',
+  official: '官方默认',
+  officialTagline: '还原 DSH 官方默认外观，不应用任何皮肤。',
+  active: '当前激活',
+  tryingOn: '试穿中',
+  tryOn: '试穿',
+  loading: '加载中…',
+  exitTryOn: '退出试穿',
+  apply: '应用',
+  applying: '应用中…',
+  restore: '恢复默认',
+  applyFailed: '应用失败',
+  appliedUnconfirmed: '已写入配置但尚未确认生效——开发模式请刷新页面；打包版（DSH Desktop）需重启应用后生效',
+  appliedNeedRestart: '已写入配置并确认生效，但宿主未热重载——请重启 dsh 后生效',
+  theme: '主题预览',
+  themeLight: '亮色',
+  themeDark: '暗色',
+  tryOnError: '试穿失败，详见控制台',
+  backgroundOpacity: '背景遮挡',
+  backgroundBlurEmpty: '空对话背景模糊',
+  backgroundBlurContent: '有对话背景模糊',
+  inputCardBlur: '输入卡模糊',
+  inputCardBlurHint: '仅模糊输入卡背后的区域，不会让整张壁纸变糊。',
+  bubbleOpacity: '气泡不透明度',
+  bubbleOpacityHint: '调节支持气泡 alpha 的皮肤消息气泡，例如鲸鱼妈妈。',
+  bubbleBlur: '气泡模糊程度',
+  bubbleBlurHint: '模糊半透明消息气泡背后的区域，与「气泡不透明度」相互独立，0 为关闭。',
+  backgroundBlurHint: '对话为空与有内容时分别应用不同的背景高斯模糊强度，0 为关闭。',
+  backgroundBlurInert: '仅对带背景图插画的皮肤可见；官方默认无背景图。',
+  backgroundHint: '即时为面板背后的背景加遮罩——数值越高越能弱化插画，帮你集中注意力。',
+  backgroundHintInert: '仅对带背景图插画的皮肤（蓝色幻想 / 鲸吟）生效；官方默认无背景图，该滑块对这些皮肤自动生效。',
+  wallpaperTitle: 'Wallpaper Engine',
+  wallpaperEnable: '启用动态壁纸',
+  wallpaperHint: '把本机 Wallpaper Engine 壁纸库用作 GUI 背景：视频、网页与场景壁纸均动态渲染（场景壁纸需要 WebGL）。macOS 没有 Wallpaper Engine 壁纸库，该功能默认关闭；开启后添加一个存放视频的目录即可。',
+  wallpaperLoadError: '壁纸库加载失败',
+  wallpaperLibraryFound: '已检测到 Wallpaper Engine 壁纸库',
+  wallpaperLibraryManual: '来自你添加的目录',
+  wallpaperRefresh: '刷新',
+  wallpaperMode: '渲染模式',
+  wallpaperModeLive: '动态',
+  wallpaperModeFrame: '静态帧',
+  wallpaperFit: '适应方式',
+  wallpaperFitCover: '铺满裁剪',
+  wallpaperFitContain: '完整缩放',
+  wallpaperFitFill: '拉伸铺满',
+  wallpaperClear: '关闭壁纸',
+  wallpaperDim: '壁纸暗化',
+  wallpaperOpacity: '壁纸不透明度',
+  wallpaperBlur: '壁纸模糊',
+  wallpaperPauseHidden: '窗口隐藏时暂停',
+  wallpaperSound: '壁纸声音',
+  wallpaperSoundHint: '播放视频壁纸的声音。浏览器可能在首次点击或按键前保持静音。',
+  wallpaperVolume: '壁纸音量',
+  wallpaperImport: '导入',
+  wallpaperImportHint: '把该壁纸复制到本地存储，Steam 库迁移或变动后仍可继续使用',
+  wallpaperReimport: '更新',
+  wallpaperRemove: '移除',
+  wallpaperUpdateAvailable: '工坊原件在导入后有更新——同步更新本地副本',
+  wallpaperEmpty: '未发现壁纸。请在下方添加一个存放视频的目录；Windows 上也可先在 Wallpaper Engine 创意工坊订阅。',
+  wallpaperTypeVideo: '视频',
+  wallpaperTypeWeb: '网页',
+  wallpaperTypeScene: '场景(静态)',
+  wallpaperTypeApp: '不支持',
+  wallpaperLoadMore: '加载更多',
+  wallpaperDirs: '手动目录',
+  wallpaperDirsEmpty: '还没有目录——添加一个以加载其中的视频。',
+  wallpaperDirsHint: 'macOS：选择一个存放 .mp4/.webm 视频的目录（或单个壁纸项目文件夹）。Windows：这里添加的目录会扩展自动检测到的 Wallpaper Engine 壁纸库。',
+  wallpaperDirPlaceholder: '/path/to/wallpapers 或 ~/Movies/wallpapers',
+  wallpaperDirAdd: '添加',
+  wallpaperDirBrowse: '浏览…',
+  wallpaperDirBrowseHint: '通过系统文件管理器（访达 / 资源管理器）选择文件夹',
+  wallpaperDirBrowseFailed: '无法打开系统目录选择框——请手动输入路径',
+  wallpaperDirBrowseTitle: '选择文件夹',
+  wallpaperDirBrowseChoose: '使用此目录',
+  wallpaperDirBrowseEmpty: '没有子目录',
+  wallpaperDirBrowseHidden: '显示隐藏目录',
+  wallpaperDirBrowseTruncated: '目录过多，仅显示开头部分。',
+  wallpaperSaveFailed: '壁纸设置保存失败。',
+  wallpaperRatingAll: '全部',
+  wallpaperRatingG: 'G',
+  wallpaperRatingPg13: 'PG-13',
+  wallpaperRatingR18: 'R18',
+  wallpaperPagePrev: '上一页',
+  wallpaperPageNext: '下一页',
+  wallpaperPageJump: '跳转',
+  wallpaperPageTotal: '第 {page} / {total} 页',
+  customThemeTitle: '自定义主题',
+  customThemeTagline: '基于官方默认主题生成并独立保存的配色方案。',
+  customThemeEdit: '编辑',
+  customThemeCloseEdit: '收起',
+  customThemeMode: '编辑模式',
+  customThemeLight: '浅色',
+  customThemeDark: '深色',
+  customThemeAccent: '强调色',
+  customThemeBackground: '背景色',
+  customThemeForeground: '前景色',
+  customThemeContrast: '对比度',
+  customThemeReset: '恢复当前模式默认',
+  customThemeResetHint: '只重置当前选择的浅色或深色配置。',
+  customThemeSaveFailed: '自定义主题修改保存失败。',
+  uninstall: '卸载',
+  uninstalling: '卸载中…',
+  uninstallConfirm: '确定要卸载皮肤「{name}」吗？本地文件将被永久删除。',
+  uninstallFailed: '卸载失败',
+  verifyIntegrity: '验证完整性',
+  verifyingIntegrity: '正在验证…',
+  verifyAllPassed: '所有 {count} 款已安装皮肤完整性正常',
+  verifyFoundIssues: '发现 {count} 款皮肤存在完整性异常',
+  verifyRepaired: '已自动修复 {count} 款皮肤的完整性异常',
+  verifyRepairFailed: '{count} 款皮肤自动修复失败',
+  repair: '修复',
+  repairing: '修复中…',
+  repaired: '已修复',
+  integrityValid: '完整',
+  integrityTampered: '文件已修改',
+  integrityMissing: '缺少文件',
+  integrityHooksRefused: 'Hooks 已拒绝',
+  cancel: '取消',
+  confirm: '确定',
+}

@@ -1,0 +1,609 @@
+--- baseline/src/client/SkinCenter.tsx	2026-10-01 12:52:42
++++ patched/src/client/SkinCenter.tsx	2026-10-01 12:52:42
+@@ -17,6 +17,9 @@
+ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+ import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
+ import type { CatalogSkin, SkinRuntimeStore } from './runtime/boot.ts'
++import type { SemanticAdapterDiagnostics } from './runtime/semantic-adapter.ts'
++import type { EffectLedgerEntry } from './runtime/effect-ledger.ts'
++import type { SkinCenterKey } from './locales.ts'
+ import type { SkinBackgroundHandle } from './background.ts'
+ import type { WallpaperHandle } from './wallpaper.ts'
+ import type { PreviewCoordinator } from './preview-coordinator.ts'
+@@ -53,6 +56,107 @@
+ const OFFICIAL = 'official'
+ 
+ /**
++ * Optional diagnostic seats read off the runtime store.
++ *
++ * The boot store publishes the catalog view and the semantic adapter; the
++ * effect ledger and the transport are reached through this structural view so
++ * a runtime that does not publish one (a card test stub, or a store built
++ * before the seat existed) reports nothing on that axis instead of throwing
++ * inside the card. `adapter` is the very object `window.__skinRuntime.adapter`
++ * names, so the card shows the state the runtime is actually running with.
++ */
++interface RuntimeDiagnosticSeats {
++  adapter?: { diagnostics(): SemanticAdapterDiagnostics }
++  ledger?: { entries(): readonly EffectLedgerEntry[] }
++  apiBase?: string
++  fetchImpl?: typeof fetch
++}
++
++/** Host half of the health snapshot, as `GET /v2/diagnostics` serves it. */
++export interface HostDiagnostics {
++  ok?: boolean
++  capturedAt?: number
++  diagnostics?: Array<{ subject: string; origin: string; errors: string[] }>
++  skins?: Array<{ id: string; origin: string; warnings: string[] }>
++  transformFailures?: Array<{
++    skinId: string
++    filename: string
++    error: string
++    violations?: string[]
++  }>
++}
++
++/** Everything the skin health section renders, already reduced to problems. */
++export interface SkinHealthReport {
++  stamped: number
++  neverMatched: Array<{ selector: string; tagged: number }>
++  invalidRules: string[]
++  ledgerFailures: string[]
++  catalog: Array<{ subject: string; origin: string; errors: string[] }>
++  warnings: Array<{ id: string; warnings: string[] }>
++  transformFailures: Array<{ skinId: string; filename: string; error: string; violations: string[] }>
++}
++
++/** Render cap per problem list; the count in each header stays exact. */
++const HEALTH_ITEMS_MAX = 20
++
++/**
++ * Reduce the runtime's own diagnostics and the host snapshot into the report.
++ *
++ * Read-only by construction: it never mutates the adapter, the ledger or the
++ * catalog, and it is only called while the section is open, so a collapsed
++ * card does no work at all. The host snapshot wins where it answers (it is the
++ * same catalog read plus the transform failures); the runtime's own catalog
++ * view is the fallback when the route is unreachable.
++ * @param runtime - the injected runtime store.
++ * @param host - the `GET /v2/diagnostics` payload, or null when unavailable.
++ * @returns the reduced health report.
++ */
++export function collectSkinHealth(runtime: SkinRuntimeStore, host: HostDiagnostics | null): SkinHealthReport {
++  const seats = runtime as unknown as RuntimeDiagnosticSeats
++  const adapter = seats.adapter?.diagnostics()
++  const neverMatched = (adapter?.rules ?? [])
++    .filter((rule) => rule.usable && !rule.everMatched)
++    .map((rule) => ({ selector: rule.selector, tagged: rule.tagged }))
++  const ledgerFailures = (seats.ledger?.entries() ?? [])
++    .filter((entry) => entry.kind === 'cleanup-failed')
++    .map((entry) => entry.label)
++  const catalog = host?.diagnostics ?? runtime.diagnostics()
++  const warnings = host?.skins !== undefined
++    ? host.skins
++      .filter((skin) => skin.warnings.length > 0)
++      .map((skin) => ({ id: skin.id, warnings: skin.warnings }))
++    : (runtime.catalog() ?? [])
++      .filter((skin) => skin.warnings.length > 0)
++      .map((skin) => ({ id: skin.manifest.id, warnings: skin.warnings }))
++  const transformFailures = (host?.transformFailures ?? []).map((failure) => ({
++    skinId: failure.skinId,
++    filename: failure.filename,
++    error: failure.error,
++    violations: failure.violations ?? [],
++  }))
++  return {
++    stamped: adapter?.stamped ?? 0,
++    neverMatched,
++    invalidRules: adapter?.invalidRules ?? [],
++    ledgerFailures,
++    catalog,
++    warnings,
++    transformFailures,
++  }
++}
++
++/** Whether the report names no problem on any axis. */
++function isHealthy(report: SkinHealthReport): boolean {
++  return report.neverMatched.length === 0
++    && report.invalidRules.length === 0
++    && report.ledgerFailures.length === 0
++    && report.catalog.length === 0
++    && report.warnings.length === 0
++    && report.transformFailures.length === 0
++}
++
++/**
+  * Live-label helper: the shown value follows the in-drag thumb immediately,
+  * and falls back to the store value once the store settles (issue #725).
+  */
+@@ -107,6 +211,11 @@
+   const [verifyReports, setVerifyReports] = useState<Record<string, { status: string; hooksTrusted: boolean; mismatches: string[]; missing: string[] }>>({})
+   const [confirmUninstallId, setConfirmUninstallId] = useState<string | null>(null)
+   const [uninstallingId, setUninstallingId] = useState<string | null>(null)
++  // Skin health is collapsed by default and inert while collapsed: the host
++  // snapshot is fetched on expand, and the runtime diagnostics are read only
++  // while it is open (see the effect below).
++  const [healthOpen, setHealthOpen] = useState(false)
++  const [hostDiagnostics, setHostDiagnostics] = useState<HostDiagnostics | null>(null)
+   // Unmount guard: once the card is gone, pending async completions must not
+   // setState (the controller itself owns the skin state and lives on).
+   const mounted = useRef(false)
+@@ -117,6 +226,26 @@
+     return () => { mounted.current = false }
+   }, [])
+ 
++  // Health data is read on expand only. Collapsing keeps the last snapshot but
++  // stops all work; a collapsed card issues no request and maps no rule table.
++  useEffect(() => {
++    if (!healthOpen) return
++    const seats = runtime as unknown as RuntimeDiagnosticSeats
++    if (typeof seats.fetchImpl !== 'function' || typeof seats.apiBase !== 'string') return
++    let cancelled = false
++    void seats.fetchImpl(`${seats.apiBase}/diagnostics`)
++      .then((res) => (res.ok ? res.json() as Promise<HostDiagnostics> : null))
++      .then((payload) => {
++        if (!cancelled && payload !== null && payload.ok === true) setHostDiagnostics(payload)
++      })
++      .catch(() => {
++        // Fail-soft: the runtime's own catalog view still renders.
++      })
++    return () => { cancelled = true }
++  }, [healthOpen, runtime])
++
++  const health = healthOpen ? collectSkinHealth(runtime, hostDiagnostics) : null
++
+   const run = (target: string, action: () => Promise<string | null>): void => {
+     const seq = ++requestSeq.current
+     setError(null)
+@@ -314,6 +443,28 @@
+ 
+   const dark = document.body.hasAttribute('data-ds-dark-theme')
+ 
++  /**
++   * One health group: a localized header carrying the exact count, the first
++   * HEALTH_ITEMS_MAX rows, and a localized remainder note. An empty group
++   * renders nothing at all, so a healthy axis costs no DOM.
++   */
++  const healthGroup = (key: SkinCenterKey, items: ReactNode[]): ReactNode => {
++    if (items.length === 0) return null
++    return (
++      <div className={css.healthGroup}>
++        <div className={css.healthGroupTitle}>{t(key, { count: items.length })}</div>
++        <ul className={css.healthList}>
++          {items.slice(0, HEALTH_ITEMS_MAX).map((item, index) => (
++            <li key={index} className={css.healthItem}>{item}</li>
++          ))}
++        </ul>
++        {items.length > HEALTH_ITEMS_MAX && (
++          <div className={css.healthMore}>{t('healthMore', { count: items.length - HEALTH_ITEMS_MAX })}</div>
++        )}
++      </div>
++    )
++  }
++
+   /** One row: try-on control + apply button + optional uninstall. Shared by the official card and every skin card. */
+   const actionButtons = (opts: {
+     key: string
+@@ -693,6 +844,60 @@
+                       onExitTryOn={exitCustomThemeTryOn}
+                       onApply={applyCustomTheme}
+                     />
++                  </div>
++
++                  <div className={css.health}>
++                    <button
++                      type="button"
++                      className={css.healthToggle}
++                      aria-expanded={healthOpen}
++                      onClick={() => { setHealthOpen(!healthOpen) }}
++                    >
++                      <span
++                        className={healthOpen ? `${css.healthCaret} ${css.healthCaretOpen}` : css.healthCaret}
++                        aria-hidden="true"
++                      />
++                      <span className={css.healthTitle}>{t('healthTitle')}</span>
++                      <span className={css.healthHint}>{healthOpen ? t('healthCollapse') : t('healthExpand')}</span>
++                    </button>
++                    {health !== null && (
++                      <div className={css.healthBody}>
++                        <div className={css.healthSummary}>{t('healthStamped', { count: health.stamped })}</div>
++                        {isHealthy(health)
++                          ? <div className={css.healthEmpty} role="status">{t('healthEmpty')}</div>
++                          : (
++                            <>
++                              {healthGroup('healthAdapterRules', health.neverMatched.map((rule) => (
++                                <code className={css.healthCode}>{rule.selector}</code>
++                              )))}
++                              {healthGroup('healthInvalidRules', health.invalidRules.map((selector) => (
++                                <code className={css.healthCode}>{selector}</code>
++                              )))}
++                              {healthGroup('healthLedgerFailures', health.ledgerFailures.map((label) => (
++                                <code className={css.healthCode}>{label}</code>
++                              )))}
++                              {healthGroup('healthCatalogDiagnostics', health.catalog.map((item) => (
++                                <span>
++                                  <code className={css.healthCode}>{item.subject}</code>
++                                  {` (${item.origin}): ${item.errors.join(' | ')}`}
++                                </span>
++                              )))}
++                              {healthGroup('healthSkinWarnings', health.warnings.map((item) => (
++                                <span>
++                                  <code className={css.healthCode}>{item.id}</code>
++                                  {`: ${item.warnings.join(' | ')}`}
++                                </span>
++                              )))}
++                              {healthGroup('healthTransformFailures', health.transformFailures.map((failure) => (
++                                <span>
++                                  <code className={css.healthCode}>{`${failure.skinId}/${failure.filename}`}</code>
++                                  {`: ${[failure.error, ...failure.violations].join(' | ')}`}
++                                </span>
++                              )))}
++                            </>
++                          )}
++                      </div>
++                    )}
+                   </div>
+                 </>
+               )
+--- baseline/src/client/locales.ts	2026-10-01 12:52:42
++++ patched/src/client/locales.ts	2026-10-01 12:52:42
+@@ -5,6 +5,14 @@
+  */
+ 
+ /** Copy keys owned by this plugin. */
++/**
++ * Skin-health keys. These name the four axes of "the skin is not doing what its
++ * author meant": a semantic rule that never matched, a rule whose selector is
++ * invalid, a cleanup that failed, and the catalog's own diagnostics. They exist
++ * so that a silent failure (a rule that matches nothing on a rebuilt shell, an
++ * excluded skin directory) has somewhere to be reported instead of being
++ * invisible.
++ */
+ export type SkinCenterKey =
+   | 'title'
+   | 'cardDescription'
+@@ -130,6 +138,18 @@
+   | 'repair'
+   | 'repairing'
+   | 'repaired'
++  | 'healthTitle'
++  | 'healthCollapse'
++  | 'healthExpand'
++  | 'healthStamped'
++  | 'healthEmpty'
++  | 'healthMore'
++  | 'healthAdapterRules'
++  | 'healthInvalidRules'
++  | 'healthLedgerFailures'
++  | 'healthCatalogDiagnostics'
++  | 'healthSkinWarnings'
++  | 'healthTransformFailures'
+ 
+ export const en: Record<SkinCenterKey, string> = {
+   title: 'Skin Center',
+@@ -256,6 +276,18 @@
+   repair: 'Repair',
+   repairing: 'Repairing…',
+   repaired: 'Repaired',
++  healthTitle: "Skin health",
++  healthCollapse: "hide",
++  healthExpand: "show",
++  healthStamped: "{count} elements tagged",
++  healthEmpty: "No problems detected.",
++  healthMore: "and {count} more",
++  healthAdapterRules: "Rules that never matched",
++  healthInvalidRules: "Rules with an invalid selector",
++  healthLedgerFailures: "Cleanup failures",
++  healthCatalogDiagnostics: "Catalog diagnostics",
++  healthSkinWarnings: "Skin warnings",
++  healthTransformFailures: "Stylesheet transform failures",
+ }
+ 
+ export const zh: Record<SkinCenterKey, string> = {
+@@ -383,4 +415,16 @@
+   integrityHooksRefused: 'Hooks 已拒绝',
+   cancel: '取消',
+   confirm: '确定',
++  healthTitle: "皮肤健康",
++  healthCollapse: "收起",
++  healthExpand: "展开",
++  healthStamped: "已标注 {count} 个元素",
++  healthEmpty: "未发现问题。",
++  healthMore: "另有 {count} 项",
++  healthAdapterRules: "从未匹配的规则",
++  healthInvalidRules: "选择器无效的规则",
++  healthLedgerFailures: "清理失败",
++  healthCatalogDiagnostics: "目录册诊断",
++  healthSkinWarnings: "皮肤警告",
++  healthTransformFailures: "样式表转换失败",
+ }
+--- baseline/src/client/skin-center.module.css	2026-10-01 12:52:42
++++ patched/src/client/skin-center.module.css	2026-10-01 12:52:42
+@@ -1068,4 +1068,45 @@
+   justify-content: flex-end;
+   gap: 8px;
+ }
++
+ 
++/* Skin health: a collapsed-by-default diagnostics block. It is inert while
++   collapsed (no request, no rule mapping), so it costs a header row and nothing
++   else until the user asks for it. */
++.healthToggle {
++  display: flex;
++  align-items: center;
++  gap: 6px;
++  width: 100%;
++  background: none;
++  border: 0;
++  padding: 4px 0;
++  cursor: pointer;
++  color: inherit;
++  font: inherit;
++  text-align: left;
++}
++.healthTitle { flex: 1; }
++.healthHint { opacity: 0.7; font-size: 0.85em; }
++.healthCaret { opacity: 0.7; }
++.healthBody { padding: 6px 0 2px; }
++.healthSummary { opacity: 0.7; font-size: 0.85em; margin-bottom: 6px; }
++.healthEmpty { opacity: 0.8; }
++.healthGroup { margin-top: 8px; }
++.healthGroupTitle { font-weight: 600; }
++.healthList { margin: 4px 0 0; padding-left: 18px; }
++.healthItem { margin: 2px 0; }
++.healthCode {
++  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
++  font-size: 0.85em;
++}
++.healthMore { opacity: 0.7; font-size: 0.85em; margin-top: 2px; }
++
++.healthCaretOpen { transform: rotate(90deg); }
++
++/* The section wrapper the card puts around the toggle and body. */
++.health {
++  margin-top: 10px;
++  border-top: 1px solid var(--dsw-alias-border-l2, rgba(127, 127, 127, 0.2));
++  padding-top: 8px;
++}
+--- baseline/src/client/runtime/semantic-adapter.ts	2026-10-01 12:52:42
++++ patched/src/client/runtime/semantic-adapter.ts	2026-10-01 12:52:42
+@@ -16,6 +16,11 @@
+  *    re-renders simply get re-stamped when their nodes are re-added;
+  *  - fail-closed diagnostics: rules that match nothing and selectors the
+  *    engine rejects are reported, never thrown into the page;
++ *  - the counters ride work that already happens: applyRule counts the
++ *    elements it stamped and flips everMatched on the match test it already
++ *    makes, so a delivery pays no extra traversal and diagnostics() is the
++ *    only place that maps the rule table (called on demand, never per
++ *    callback);
+  *  - the adapter never REMOVES attributes it did not set; disposal only
+  *    disconnects the observer (stamping is cosmetic and scopes itself under
+  *    html[data-dsh-skin] consumers).
+@@ -166,8 +171,29 @@
+   unmatchedRules: string[]
+   /** Total attributes stamped since start. */
+   stamped: number
++  /** Per-rule status, in rule-table order (fresh snapshot per call). */
++  rules: SemanticRuleStatus[]
+ }
+ 
++/** One rule's live counters, as the health surface reads them. */
++export interface SemanticRuleStatus {
++  selector: string
++  /** The rule table's audit note (why the rule exists). */
++  note: string
++  /** False once the engine rejected the selector. */
++  usable: boolean
++  /**
++   * Whether the rule has EVER matched since start. A rule whose anchor the
++   * host no longer renders stays false and is exactly what the health
++   * surface must be able to name.
++   */
++  everMatched: boolean
++  /** Elements this rule has actually stamped since start (idempotent). */
++  tagged: number
++  /** Elements matched in the latest full pass (the unmatchedRules basis). */
++  matchedInPass: number
++}
++
+ export interface SemanticAdapter {
+   start(): void
+   stop(): void
+@@ -181,13 +207,48 @@
+   usable: boolean
+   /** Elements matched in the latest full pass. */
+   matchedInPass: number
++  /** Elements this rule has stamped since start. */
++  tagged: number
++  /** Sticky match flag: never reset by a later pass. */
++  everMatched: boolean
++  /** Elements already counted in this pass, so a re-tag is not a second element. */
++  countedThisPass: Set<Element>
+ }
+ 
+ export function createSemanticAdapter(doc: Document): SemanticAdapter {
+-  const rules: LiveRule[] = SEMANTIC_RULES_V1.map((rule) => ({ rule, usable: true, matchedInPass: 0 }))
++  const rules: LiveRule[] = SEMANTIC_RULES_V1.map((rule) => ({
++    rule,
++    usable: true,
++    matchedInPass: 0,
++    tagged: 0,
++    countedThisPass: new Set<Element>(),
++    everMatched: false,
++  }))
+   let observer: MutationObserver | null = null
+   let stamped = 0
+   let running = false
++
++  /**
++   * Attribute names this adapter writes itself.
++   *
++   * The observer below treats an attribute record as "a glyph arrived" and
++   * re-runs the rule table over the changed node's ancestor chain. Our own
++   * stamps produce attribute records too, so without this set the pass re-enters
++   * the pass that produced it. That is not merely wasteful: two rules that
++   * disagree about the value of the same attribute then overwrite each other
++   * forever, the observer callback never returns, and the page is starved —
++   * reproduced by mutating any attribute on an already-stamped element.
++   *
++   * The signal this path exists for is a HOST anchor appearing (a re-render that
++   * flips `data-slot` instead of replacing the node), and host anchors are never
++   * names we write, so filtering by our own namespace keeps every real case and
++   * drops only the echo.
++   */
++  const SELF_WRITTEN_ATTRS = new Set<string>()
++  for (const rule of SEMANTIC_RULES_V1) {
++    // attrs is an array of [name, value] pairs, not a Map.
++    for (const [name] of rule.attrs) SELF_WRITTEN_ATTRS.add(name)
++  }
+ 
+   const applyRule = (live: LiveRule, el: Element): void => {
+     if (!live.usable) return
+@@ -200,12 +261,21 @@
+     }
+     if (!hit) return
+     live.matchedInPass += 1
++    live.everMatched = true
++    let stampedHere = false
+     for (const [name, value] of live.rule.attrs) {
+       if (el.getAttribute(name) !== value) {
+         el.setAttribute(name, value)
+         stamped += 1
++        stampedHere = true
+       }
+     }
++    // Counted on the comparison the stamp already makes, so a re-delivery of
++    // an already-tagged element does not inflate the count.
++    if (stampedHere && !live.countedThisPass.has(el)) {
++      live.countedThisPass.add(el)
++      live.tagged += 1
++    }
+   }
+ 
+   const applyToTree = (rootEl: Element): void => {
+@@ -224,7 +294,13 @@
+   }
+ 
+   const fullPass = (): void => {
+-    for (const live of rules) live.matchedInPass = 0
++    for (const live of rules) {
++      live.matchedInPass = 0
++      // Drop the previous pass's element references. A Set of Elements would
++      // otherwise pin every node this rule ever tagged, detached ones included,
++      // for the lifetime of the page.
++      live.countedThisPass = new Set<Element>()
++    }
+     if (doc.documentElement) applyToTree(doc.documentElement)
+   }
+ 
+@@ -276,7 +352,13 @@
+             // (a re-render that flips the attribute instead of replacing the
+             // node) is the same signal, and childList alone never sees it.
+             const target = record.target.nodeType === 1 ? record.target as Element : null
+-            if (target !== null && record.type === 'attributes') reanchorAround(target)
++            if (
++              target !== null
++              && record.type === 'attributes'
++              && !SELF_WRITTEN_ATTRS.has(record.attributeName ?? '')
++            ) {
++              reanchorAround(target)
++            }
+           }
+         } catch {
+           // Fail-closed: a tagging error must never break the host page.
+@@ -301,6 +383,14 @@
+         invalidRules: rules.filter((r) => !r.usable).map((r) => r.rule.selector),
+         unmatchedRules: rules.filter((r) => r.usable && r.matchedInPass === 0).map((r) => r.rule.selector),
+         stamped,
++        rules: rules.map((r) => ({
++          selector: r.rule.selector,
++          note: r.rule.note,
++          usable: r.usable,
++          everMatched: r.everMatched,
++          tagged: r.tagged,
++          matchedInPass: r.matchedInPass,
++        })),
+       }
+     },
+   }
+--- baseline/tests/semantic-adapter.spec.ts	2026-10-01 12:52:42
++++ patched/tests/semantic-adapter.spec.ts	2026-10-01 12:52:42
+@@ -12,7 +12,7 @@
+ 
+ import { describe, expect, it } from 'vitest'
+ 
+-import { createSemanticAdapter } from '../src/client/runtime/semantic-adapter.ts'
++import { createSemanticAdapter, SEMANTIC_RULES_V1 } from '../src/client/runtime/semantic-adapter.ts'
+ 
+ /** One observer callback turn. */
+ const settle = (): Promise<void> => new Promise((resolve) => { setTimeout(resolve, 0) })
+@@ -124,3 +124,67 @@
+     expect(row.getAttribute('data-dsh-part')).toBeNull()
+   })
+ })
++
++describe('semantic adapter diagnostics counters', () => {
++  it('counts the elements a rule tagged and remembers that it matched', async () => {
++    // Given a shell fragment carrying two of the rule table's anchors
++    document.body.innerHTML = '<div data-slot="root"></div><div data-turn-tail></div>'
++    const adapter = createSemanticAdapter(document)
++    adapter.start()
++
++    // When the counters are read
++    const diagnostics = adapter.diagnostics()
++    const bySelector = (selector: string) =>
++      diagnostics.rules.find((rule) => rule.selector === selector)!
++
++    // Then a matched rule reports its sticky match and one tagged element
++    expect(bySelector('[data-slot="root"]').everMatched).toBe(true)
++    expect(bySelector('[data-slot="root"]').tagged).toBe(1)
++    expect(bySelector('[data-turn-tail]').everMatched).toBe(true)
++    expect(bySelector('[data-turn-tail]').tagged).toBe(1)
++    // And every rule carries its audit note, so the health surface can name why
++    expect(bySelector('[data-turn-tail]').note).not.toBe('')
++    adapter.stop()
++  })
++
++  it('reports a rule that has never matched', async () => {
++    // Given a shell fragment without the turn-tail anchor
++    document.body.innerHTML = '<div data-slot="root"></div>'
++    const adapter = createSemanticAdapter(document)
++    adapter.start()
++
++    // When the counters are read
++    const diagnostics = adapter.diagnostics()
++    const tail = diagnostics.rules.find((rule) => rule.selector === '[data-turn-tail]')!
++
++    // Then the never-matched rule is distinguishable from the matched one
++    expect(tail.everMatched).toBe(false)
++    expect(tail.tagged).toBe(0)
++    expect(tail.usable).toBe(true)
++    expect(diagnostics.unmatchedRules).toContain('[data-turn-tail]')
++    expect(diagnostics.unmatchedRules).not.toContain('[data-slot="root"]')
++    expect(diagnostics.rules).toHaveLength(SEMANTIC_RULES_V1.length)
++    adapter.stop()
++  })
++
++  it('does not inflate the tagged count when an element is delivered again', async () => {
++    // Given one element the adapter has already stamped
++    document.body.innerHTML = '<div id="host"></div>'
++    const adapter = createSemanticAdapter(document)
++    adapter.start()
++    const row = document.createElement('div')
++    row.setAttribute('data-turn-tail', '')
++    document.getElementById('host')!.appendChild(row)
++    await settle()
++
++    // When a later attribute record re-anchors the same node
++    row.setAttribute('data-decoration', 'chip')
++    await settle()
++
++    // Then the element is counted once, not once per delivery
++    const tail = adapter.diagnostics().rules.find((rule) => rule.selector === '[data-turn-tail]')!
++    expect(tail.tagged).toBe(1)
++    expect(tail.everMatched).toBe(true)
++    adapter.stop()
++  })
++})

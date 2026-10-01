@@ -371,3 +371,24 @@ describe('SkinCenter custom theme transactions', () => {
     await act(async () => { await transaction })
   })
 })
+
+describe('skin health section', () => {
+  it('stays collapsed and inert until asked, then opens the diagnostics body', async () => {
+    await renderSkinCenter({})
+    // Found by its title, not by [aria-expanded]: the card carries more than one
+    // expandable control and querySelector answers with the first in DOM order.
+    const button = (): HTMLElement | undefined =>
+      [...host.querySelectorAll<HTMLElement>('button')].find((b) => (b.textContent ?? '').includes(zh.healthTitle))
+
+    expect(button()).toBeDefined()
+    expect(button()?.getAttribute('aria-expanded')).toBe('false')
+    // Collapsed means inert: the diagnostics body is not in the tree at all.
+    expect(host.textContent ?? '').not.toContain('healthBody')
+
+    await act(async () => { button()?.click() })
+
+    expect(button()?.getAttribute('aria-expanded')).toBe('true')
+    // The summary line proves the body rendered.
+    expect(host.textContent ?? '').toContain('已标注')
+  })
+})

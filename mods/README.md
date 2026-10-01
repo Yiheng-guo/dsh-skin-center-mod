@@ -412,7 +412,7 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 697 passed / 15 failed — **zero regressions**, see below |
+| `pnpm test` | 698 passed / 15 failed — **zero regressions**, see below |
 | `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
@@ -420,7 +420,7 @@ Controlled experiment, both runs in the identical `skins/` state:
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 712 | 15 | **697** |
+| these patches | 713 | 15 | **698** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
@@ -428,11 +428,11 @@ Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository'
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
 checkout. **Zero AssertionError / TypeError / ReferenceError** on both sides of the
-experiment. The 73 added tests all pass (697 − 624), and every fix in this series
+experiment. The 74 added tests all pass (698 − 624), and every fix in this series
 was individually proven to fail when its source change is reverted.
 
 Reproducibility: applying the thirteen patches to the pristine files reproduces
-`patched/` byte-for-byte (36 files, three of them new).
+`patched/` byte-for-byte (39 files, three of them new).
 
 ## Not included
 
@@ -454,16 +454,33 @@ overlooked:
 Recorded here rather than quietly dropped, because they affect what this patch
 set actually delivers.
 
-**Withdrawn: the skin-health card UI.** The card surface that consumed the
-diagnostics (a collapsible "skin health" section) rendered into an infinite
-update loop (`Maximum update depth exceeded`). The cause was traced in part to a
-test stub returning a fresh `getSnapshot` object on every call — the very trap
-the controller documents — but fixing the stub did not stop the loop, and the
-implementation could not be verified within the time available. Rather than ship
-a settings card that hangs the page, `SkinCenter.tsx`, `locales.ts` and
-`skin-center.module.css` are reverted to pristine. What ships is the adapter
-half: per-rule counters plus `GET /v2/diagnostics` (patch 08). Re-adding the card
-surface needs a fresh implementation, not a rebase of the withdrawn one.
+**The skin-health card: withdrawn, then delivered.** An earlier revision of this
+file recorded the card as withdrawn because it rendered into an infinite update
+loop. That call was too cautious, and the correction is worth recording: the loop
+was in the withdrawn SPEC's harness, not in the component. The component's
+subscriptions are all stable (a theme string, seven background numbers, the
+catalog array, the controller's cached state object, the custom-theme state), and
+restoring it against a harness with stable snapshots renders in milliseconds with
+no loop at all.
+
+What was genuinely lost was the copy: the 26 keys the component reads survive in
+the component, but their English and Chinese values were never committed and no
+longer exist in any build artifact. (Only twelve of those 26 turned out to be
+locale keys at all; the rest were CSS classes and spec strings caught by a first,
+too-broad extraction.) Those twelve are re-authored here in both languages, and
+the health stylesheet is re-authored with them.
+
+The card is collapsed by default and inert while collapsed: the host snapshot is
+fetched only on expand, and the runtime diagnostics are read only while it is
+open. A test in `tests/skin-center-custom-theme.spec.tsx` opens it and asserts the
+body renders; flipping the default to open makes that test fail.
+
+When this round restored the stylesheet it also tripped
+`tests/css-class-coverage.spec.ts`, which requires every `css.<name>` a component
+references to exist in the module. The component references a bare
+`css.health` wrapper, which a first extraction missed because it is not followed
+by another letter. That is the real reason the coverage gate exists, and it
+caught the omission immediately.
 
 **Wired: the recommendation half of the sidecar.** Both halves of
 `tuning.json` are now consumed. The `tokens` half is applied scoped by the skin
