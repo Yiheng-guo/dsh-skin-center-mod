@@ -1,0 +1,872 @@
+--- baseline/scripts/dsh-skin.cjs	2026-10-01 12:41:45
++++ patched/scripts/dsh-skin.cjs	2026-10-01 12:41:45
+@@ -7,8 +7,9 @@
+  * Skins are pure asset directories (skin.json + skin.css + optional
+  * patches.css / hooks.mjs / assets/). The skin-center package is the only
+  * loader; this CLI validates, installs and selects skins. It never touches
+- * cordis.patch.yml — switching is a client-side atomic swap, and the next
+- * page load picks the selection up through the tapIndex adapter.
++ * cordis.patch.yml — switching is a client-side atomic swap: an open page
++ * follows the state file through the v2 active-state poll, and a page that
++ * loads later picks the selection up through the tapIndex adapter.
+  *
+  * Commands:
+  *   dsh-skin validate <dir>     validate a skin directory against the v2 contract
+@@ -17,10 +18,13 @@
+  *                                and still only run their declarative parts (hooks require
+  *                                in-repo review)]
+  *   dsh-skin uninstall <id>     remove a user-installed skin (built-ins refuse)
+- *   dsh-skin use <id>           select a skin (the GUI picks it up on next load)
++ *   dsh-skin use <id>           select a skin (open pages follow within the poll interval)
+  *   dsh-skin use official       restore the official stock look
+  *   dsh-skin list               show the catalog (origin, warnings, diagnostics)
+  *   dsh-skin current            print the selected skin id (or "none")
++ *   dsh-skin bg get             print the effective background config (defaults filled in)
++ *   dsh-skin bg set [flags]     merge-write background fields (values are clamped)
++ *   dsh-skin bg reset           drop every background override (back to defaults)
+  *
+  * The validator/transformer are imported from the skin-center package's
+  * built lib — never re-implemented here.
+@@ -35,6 +39,9 @@
+ /** One skin id: a plain directory name, never a path (mirrors the skin-center contract). */
+ const SKIN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+ 
++/** One `bg` subcommand: a bare word, never a path or an option. */
++const BG_SUBCOMMAND = /^[a-z][a-z-]{0,15}$/
++
+ /** Load the skin-center contract surface (ESM lib from this CJS CLI). */
+ async function loadLib() {
+   try {
+@@ -46,6 +53,25 @@
+   }
+ }
+ 
++/**
++ * The active-state and background helpers the `bg` group needs.
++ *
++ * Normally they come from the built lib above. A checkout can be one edit
++ * ahead of its build, though (`scripts/` is never published, so this CLI only
++ * ever runs from a checkout): when the lib predates these re-exports, read the
++ * same helpers from their modules instead of failing the command. That is
++ * still one implementation — the files the lib is built from, never a copy.
++ * The source import needs Node's TypeScript type stripping (>= 22.18).
++ */
++async function loadStateLib(lib) {
++  if (typeof lib.readActiveState === 'function' && typeof lib.normalizeSkinBackground === 'function') return lib
++  const [state, background] = await Promise.all([
++    import(pathToFileURL(path.join(__dirname, '..', 'src', 'active-state.ts')).href),
++    import(pathToFileURL(path.join(__dirname, '..', 'src', 'core', 'background.ts')).href),
++  ])
++  return { ...lib, ...state, ...background }
++}
++
+ /** Validate one skin directory; returns a report object. */
+ async function validateDir(lib, dir) {
+   const report = { ok: true, errors: [], warnings: [], manifest: null }
+@@ -177,7 +203,7 @@
+   const statePath = lib.defaultActiveStatePath()
+   if (id === 'official') {
+     lib.writeActiveSelection(statePath, null)
+-    console.log('dsh-skin: selection cleared (official stock look); reload the GUI to apply')
++    console.log('dsh-skin: selection cleared (official stock look); an open GUI returns to it within a couple of seconds, a page opened later starts there')
+     return
+   }
+   const catalog = lib.loadSkinCatalog()
+@@ -187,7 +213,7 @@
+     process.exit(1)
+   }
+   lib.writeActiveSelection(statePath, id)
+-  console.log(`dsh-skin: selected "${id}"; reload the GUI to apply`)
++  console.log(`dsh-skin: selected "${id}"; an open GUI applies it within a couple of seconds, a page opened later picks it up on load`)
+ }
+ 
+ async function cmdList() {
+@@ -210,8 +236,159 @@
+   const lib = await loadLib()
+   const active = lib.readActiveSelection(lib.defaultActiveStatePath())
+   console.log(active === null ? 'none' : active)
++}
++
++/**
++ * The background fields in the order `bg get` prints them, each with the flag
++ * that writes it. The two per-state blurs share one flag because the GUI pairs
++ * them in a single row.
++ */
++const BACKGROUND_FIELDS = [
++  ['enabled', '--enabled'],
++  ['backgroundOpacity', '--occlusion'],
++  ['backgroundBlurEmpty', '--blur a/b'],
++  ['backgroundBlurContent', '--blur a/b'],
++  ['inputCardBlur', '--input-blur'],
++  ['bubbleOpacity', '--bubble'],
++  ['bubbleBlur', '--bubble-blur'],
++]
++
++/** One `bg set` flag mapped to the stored field it writes (the blurs are special). */
++const BACKGROUND_VALUE_FLAGS = {
++  '--enabled': 'enabled',
++  '--occlusion': 'backgroundOpacity',
++  '--input-blur': 'inputCardBlur',
++  '--bubble': 'bubbleOpacity',
++  '--bubble-blur': 'bubbleBlur',
+ }
+ 
++/**
++ * Parse one numeric flag value. Out-of-range input is accepted and clamped by
++ * the shared normalizer later (the documented ranges are what the sliders
++ * offer); a value that is not a finite number is rejected instead of silently
++ * becoming 0.
++ */
++function parseBackgroundNumber(flag, raw) {
++  if (raw.trim() === '') return { error: `${flag} needs a number` }
++  const value = Number(raw)
++  if (!Number.isFinite(value)) return { error: `${flag}: "${raw}" is not a number` }
++  return { value }
++}
++
++/** Parse `bg set` argv into a background patch; `{ error }` on unusable input. */
++function parseBackgroundPatch(args) {
++  const patch = {}
++  for (let i = 0; i < args.length; i += 1) {
++    const flag = args[i]
++    const raw = args[i + 1]
++    if (!flag.startsWith('--')) return { error: `unexpected argument "${flag}"` }
++    if (raw === undefined || raw.startsWith('--')) return { error: `${flag} needs a value` }
++    i += 1
++    if (flag === '--blur') {
++      const parts = raw.split('/')
++      if (parts.length !== 2) return { error: `--blur takes <empty>/<content>, not "${raw}"` }
++      const empty = parseBackgroundNumber('--blur (empty)', parts[0])
++      if (empty.error) return empty
++      const content = parseBackgroundNumber('--blur (content)', parts[1])
++      if (content.error) return content
++      patch.backgroundBlurEmpty = empty.value
++      patch.backgroundBlurContent = content.value
++      continue
++    }
++    const field = BACKGROUND_VALUE_FLAGS[flag]
++    if (field === undefined) return { error: `unknown background flag "${flag}"` }
++    if (field === 'enabled') {
++      if (raw !== 'true' && raw !== 'false') return { error: `--enabled takes true or false, not "${raw}"` }
++      patch.enabled = raw === 'true'
++      continue
++    }
++    const parsed = parseBackgroundNumber(flag, raw)
++    if (parsed.error) return parsed
++    patch[field] = parsed.value
++  }
++  return { patch }
++}
++
++/**
++ * Print the effective background config with every field's resolved value, so
++ * an out-of-range or partial store never hides what is actually applied. The
++ * marker says whether the field is an override at all: a field that is absent
++ * resolves to its default, which is what distinguishes an explicitly stored 0
++ * from a value that was never set.
++ */
++function printBackground(helpers, stored) {
++  const effective = helpers.resolveSkinBackground(stored)
++  if (stored === null) console.log('  stored: none (every field at its documented default)')
++  for (const [field, flag] of BACKGROUND_FIELDS) {
++    const marker = stored !== null && stored[field] !== undefined ? 'set' : 'default'
++    console.log(`  ${field} (${flag}): ${effective[field]} (${marker})`)
++  }
++}
++
++async function cmdBgGet(args) {
++  if (args.length > 0) {
++    console.error(`dsh-skin: bg get takes no arguments (got "${args[0]}")`)
++    process.exit(1)
++  }
++  const helpers = await loadStateLib(await loadLib())
++  const state = helpers.readActiveState(helpers.defaultActiveStatePath())
++  console.log('dsh-skin bg get')
++  printBackground(helpers, state.background)
++}
++
++async function cmdBgSet(args) {
++  if (args.length === 0) return usage(1)
++  const parsed = parseBackgroundPatch(args)
++  if (parsed.error) {
++    console.error(`dsh-skin: ${parsed.error}`)
++    process.exit(1)
++  }
++  const helpers = await loadStateLib(await loadLib())
++  const statePath = helpers.defaultActiveStatePath()
++  const current = helpers.readActiveState(statePath).background ?? {}
++  // Merge, then clamp through the shared normalizer: the CLI never invents a
++  // range of its own, and an out-of-range value lands on the documented bound
++  // instead of being rejected.
++  const merged = helpers.normalizeSkinBackground({ ...current, ...parsed.patch })
++  helpers.writeActiveState(statePath, { background: merged })
++  console.log('dsh-skin: background updated')
++  printBackground(helpers, merged)
++}
++
++async function cmdBgReset(args) {
++  if (args.length > 0) {
++    console.error(`dsh-skin: bg reset takes no arguments (got "${args[0]}")`)
++    process.exit(1)
++  }
++  const helpers = await loadStateLib(await loadLib())
++  const statePath = helpers.defaultActiveStatePath()
++  // Drop the section instead of writing defaults back: the section means "the
++  // user's overrides", and an absent key is what makes `bg get` report every
++  // field as (default) again. writeActiveState omits a null background.
++  helpers.writeActiveState(statePath, { background: null })
++  console.log('dsh-skin: background overrides cleared')
++  printBackground(helpers, null)
++}
++
++async function cmdBackground(sub, args) {
++  if (sub === undefined) {
++    console.error('dsh-skin: bg needs a subcommand (get, set or reset)')
++    process.exit(1)
++  }
++  // The subcommand is raw argv: reject anything path- or option-shaped before
++  // dispatching on it, the same way uninstall guards a skin id.
++  if (!BG_SUBCOMMAND.test(sub)) {
++    console.error(`dsh-skin: refusing "${sub}" — a bg subcommand is a bare word`)
++    process.exit(1)
++  }
++  const run = { get: cmdBgGet, set: cmdBgSet, reset: cmdBgReset }[sub]
++  if (run === undefined) {
++    console.error(`dsh-skin: unknown bg command "${sub}" — get, set or reset`)
++    process.exit(1)
++  }
++  return run(args)
++}
++
+ function usage(exitCode) {
+   console.log('dsh-skin — skin tooling for the DSH web GUI (v2)')
+   console.log('')
+@@ -219,9 +396,16 @@
+   console.log('  dsh-skin validate <dir>          validate a skin directory against the v2 contract')
+   console.log('  dsh-skin install <dir>           install into $DSH_HOME/skins/<id>/ [--force] [--allow-hooks]')
+   console.log('  dsh-skin uninstall <id>          remove a user-installed skin')
+-  console.log('  dsh-skin use <id> | official     select a skin / restore the stock look (GUI applies on next load)')
++  console.log('  dsh-skin use <id> | official     select a skin / restore the stock look (open pages follow in ~2s)')
+   console.log('  dsh-skin list                    show the catalog with origins and diagnostics')
+   console.log('  dsh-skin current                 print the selected skin id (or "none")')
++  console.log('  dsh-skin bg get                  print the effective background config (defaults resolved,')
++  console.log('                                   "(set)" marks a field that is an override)')
++  console.log('  dsh-skin bg set [flags]          merge-write background fields (out-of-range values clamp)')
++  console.log('                                     --enabled <true|false>   --occlusion <0-100>')
++  console.log('                                     --blur <empty>/<content> (each 0-20)  --input-blur <0-20>')
++  console.log('                                     --bubble <0-100>         --bubble-blur <0-20>')
++  console.log('  dsh-skin bg reset                drop every background override (all fields back to defaults)')
+   process.exit(exitCode)
+ }
+ 
+@@ -236,6 +420,7 @@
+     case 'use': return cmdUse(positional)
+     case 'list': return cmdList()
+     case 'current': return cmdCurrent()
++    case 'bg': return cmdBackground(arg, rest)
+     default: return usage(cmd === undefined ? 0 : 1)
+   }
+ }
+--- baseline/scripts/dsh-skin.test.mjs	2026-10-01 12:41:45
++++ patched/scripts/dsh-skin.test.mjs	2026-10-01 12:41:45
+@@ -1,6 +1,6 @@
+ /**
+- * Tests for scripts/dsh-skin (v2): validate / install / use / list / current
+- * against throwaway DSH_HOME / DSH_SKINS_HOME, so the real ~/.dsh is never
++ * Tests for scripts/dsh-skin (v2): validate / install / use / list / current /
++ * bg against throwaway DSH_HOME / DSH_SKINS_HOME, so the real ~/.dsh is never
+  * touched.
+  */
+ import { test } from 'node:test'
+@@ -41,6 +41,11 @@
+   }
+ }
+ 
++/** The v2 active-state document inside one throwaway DSH_HOME. */
++function stateFile(home) {
++  return join(home, '.dsh', 'skin-center-active.json')
++}
++
+ test('validate passes a well-formed skin', () => {
+   const root = mkdtempSync(join(tmpdir(), 'dsh-skin-fixture-'))
+   const dir = fixtureSkin(root, 'demo')
+@@ -127,6 +132,120 @@
+   assert.equal(after.out.trim(), 'none')
+ })
+ 
++test('use reports the live apply instead of a reload', () => {
++  // An open page converges through the v2 poll, so "reload the GUI to apply"
++  // was wrong twice over: it undersold the follow and hid the no-page case.
++  const use = run(['use', 'blue-fantasy'])
++  assert.equal(use.code, 0, use.out)
++  assert.match(use.out, /open GUI applies it within a couple of seconds/)
++  assert.match(use.out, /a page opened later picks it up on load/)
++  assert.ok(!/reload the GUI/.test(use.out), use.out)
++
++  const off = run(['use', 'official'], { DSH_HOME: join(use.home, '.dsh') })
++  assert.equal(off.code, 0, off.out)
++  assert.match(off.out, /open GUI returns to it within a couple of seconds/)
++  assert.match(off.out, /a page opened later starts there/)
++  assert.ok(!/reload the GUI/.test(off.out), off.out)
++})
++
++test('bg get resolves field defaults and marks stored overrides', () => {
++  const fresh = run(['bg', 'get'])
++  assert.equal(fresh.code, 0, fresh.out)
++  assert.match(fresh.out, /stored: none \(every field at its documented default\)/)
++  assert.match(fresh.out, /enabled \(--enabled\): true \(default\)/)
++  assert.match(fresh.out, /inputCardBlur \(--input-blur\): 10 \(default\)/)
++  assert.match(fresh.out, /bubbleOpacity \(--bubble\): 50 \(default\)/)
++
++  // An explicitly stored 0 must read differently from a field that was never
++  // set, which is the whole reason the marker follows the document, not the
++  // value.
++  const env = { DSH_HOME: join(fresh.home, '.dsh') }
++  const set = run(['bg', 'set', '--occlusion', '0'], env)
++  assert.equal(set.code, 0, set.out)
++  const after = run(['bg', 'get'], env)
++  assert.match(after.out, /backgroundOpacity \(--occlusion\): 0 \(set\)/)
++  assert.match(after.out, /inputCardBlur \(--input-blur\): 10 \(default\)/)
++  assert.ok(!/stored: none/.test(after.out), after.out)
++})
++
++test('bg set clamps out-of-range values instead of rejecting them', () => {
++  const r = run(['bg', 'set', '--occlusion', '150', '--blur', '40/-3', '--input-blur', '21', '--bubble', '999', '--bubble-blur', '99.6'])
++  assert.equal(r.code, 0, r.out)
++  const env = { DSH_HOME: join(r.home, '.dsh') }
++  const get = run(['bg', 'get'], env)
++  assert.match(get.out, /backgroundOpacity \(--occlusion\): 100 \(set\)/)
++  assert.match(get.out, /backgroundBlurEmpty \(--blur a\/b\): 20 \(set\)/)
++  assert.match(get.out, /backgroundBlurContent \(--blur a\/b\): 0 \(set\)/)
++  assert.match(get.out, /inputCardBlur \(--input-blur\): 20 \(set\)/)
++  assert.match(get.out, /bubbleOpacity \(--bubble\): 100 \(set\)/)
++  assert.match(get.out, /bubbleBlur \(--bubble-blur\): 20 \(set\)/)
++  // The document carries the clamped values, not the raw input.
++  const document = JSON.parse(readFileSync(stateFile(r.home), 'utf8'))
++  assert.deepEqual(document.background, {
++    backgroundOpacity: 100,
++    backgroundBlurEmpty: 20,
++    backgroundBlurContent: 0,
++    inputCardBlur: 20,
++    bubbleOpacity: 100,
++    bubbleBlur: 20,
++  })
++})
++
++test('bg set rejects values it cannot parse and writes nothing', () => {
++  const cases = [
++    [['--occlusion', 'abc'], /--occlusion: "abc" is not a number/],
++    [['--occlusion', '1e999'], /--occlusion: "1e999" is not a number/],
++    [['--blur', '3'], /--blur takes <empty>\/<content>, not "3"/],
++    [['--enabled', 'maybe'], /--enabled takes true or false, not "maybe"/],
++    [['--bogus', '1'], /unknown background flag "--bogus"/],
++    [['--bubble'], /--bubble needs a value/],
++    [['30'], /unexpected argument "30"/],
++  ]
++  for (const [args, pattern] of cases) {
++    const r = run(['bg', 'set', ...args])
++    assert.equal(r.code, 1, `${args.join(' ')} -> ${r.out}`)
++    assert.match(r.out, pattern)
++    assert.ok(!existsSync(stateFile(r.home)), `a rejected write must not touch the state file (${args.join(' ')})`)
++  }
++})
++
++test('bg reset drops every override and keeps the selection', () => {
++  const use = run(['use', 'blue-fantasy'])
++  assert.equal(use.code, 0, use.out)
++  const env = { DSH_HOME: join(use.home, '.dsh') }
++  const set = run(['bg', 'set', '--occlusion', '30', '--blur', '4/6'], env)
++  assert.equal(set.code, 0, set.out)
++
++  const reset = run(['bg', 'reset'], env)
++  assert.equal(reset.code, 0, reset.out)
++  const after = run(['bg', 'get'], env)
++  assert.match(after.out, /stored: none/)
++  const fieldLines = after.out.trim().split('\n').filter((line) => line.startsWith('  ') && !line.includes('stored:'))
++  assert.equal(fieldLines.length, 7, after.out)
++  for (const line of fieldLines) assert.match(line, /\(default\)/, line)
++
++  // The override key is gone entirely (that is what makes the next `bg get`
++  // report defaults), and the selection it sat beside survives.
++  const document = JSON.parse(readFileSync(stateFile(use.home), 'utf8'))
++  assert.equal('background' in document, false)
++  assert.equal(run(['current'], env).out.trim(), 'blue-fantasy')
++})
++
++test('bg refuses an unknown, path-shaped or over-argumented invocation', () => {
++  const cases = [
++    [['bg'], /bg needs a subcommand/],
++    [['bg', '../etc'], /bare word/],
++    [['bg', 'bogus'], /unknown bg command "bogus"/],
++    [['bg', 'get', 'extra'], /bg get takes no arguments/],
++    [['bg', 'reset', '--occlusion', '5'], /bg reset takes no arguments/],
++  ]
++  for (const [args, pattern] of cases) {
++    const r = run(args)
++    assert.equal(r.code, 1, `${args.join(' ')} -> ${r.out}`)
++    assert.match(r.out, pattern)
++  }
++})
++
+ test('use rejects an unknown skin', () => {
+   const r = run(['use', 'no-such-skin'])
+   assert.equal(r.code, 1)
+--- baseline/src/client/runtime/boot.ts	2026-10-01 12:41:45
++++ patched/src/client/runtime/boot.ts	2026-10-01 12:41:45
+@@ -12,6 +12,7 @@
+  * @module @linxin666/dsh-client-ui-skin-center/runtime/boot
+  */
+ 
++import { SKIN_BACKGROUND_FIELDS, resolveSkinBackground, type SkinBackgroundConfig } from '../../core/background.ts'
+ import { createEffectLedger } from './effect-ledger.ts'
+ import { createSemanticAdapter } from './semantic-adapter.ts'
+ import type { SemanticAdapter } from './semantic-adapter.ts'
+@@ -44,6 +45,21 @@
+   errors: string[]
+ }
+ 
++/**
++ * The convergence seat for a background write made outside this page.
++ *
++ * The browser half owns exactly one BackgroundController (src/client/index.ts
++ * / src/client/background.ts) and hands it in here, so the follow below
++ * converges through that instance instead of a second controller. `init()`
++ * is the class's externally-sourced entry point: it replaces the applied
++ * values and never persists, which is what keeps a read from turning into a
++ * write.
++ */
++export interface SkinBackgroundTarget {
++  /** Replace the applied config with an externally sourced one; never persists. */
++  init(next: SkinBackgroundConfig | null): void
++}
++
+ export interface SkinRuntimeStore {
+   readonly controller: SkinController
+   readonly adapter: SemanticAdapter
+@@ -59,6 +75,12 @@
+   readonly apiBase: string
+   /** The fetch seat this store uses (injectable for tests). */
+   readonly fetchImpl: typeof fetch
++  /**
++   * The background controller this page already owns, or null when the page
++   * booted without one. The persisted-background follow converges writes
++   * through it; null keeps the follow selection-only.
++   */
++  readonly background: SkinBackgroundTarget | null
+   /** Loaded catalog snapshot (null until the first fetch resolves). */
+   catalog(): CatalogSkin[] | null
+   diagnostics(): CatalogDiagnostic[]
+@@ -78,6 +100,13 @@
+   fetchImpl?: typeof fetch
+   /** Background-media priority: true suppresses skin manifest media (WE wallpaper wins). */
+   suppressBackgroundMedia?: () => boolean
++  /**
++   * The background controller this page owns (src/client/index.ts constructs
++   * it before boot), so a background write from outside the page converges
++   * through the existing controller. Omitted keeps the runtime
++   * selection-only.
++   */
++  background?: SkinBackgroundTarget
+ }
+ 
+ export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
+@@ -135,6 +164,7 @@
+     window: doc.defaultView ?? window,
+     apiBase,
+     fetchImpl,
++    background: options.background ?? null,
+     catalog: () => catalog,
+     diagnostics: () => diagnostics,
+     refreshCatalog,
+@@ -232,8 +262,14 @@
+ /** Polling cadence for a selection changed outside this page. */
+ const SELECTION_POLL_MS = 2000
+ 
+-/** Read the persisted selection; undefined when the endpoint cannot answer. */
+-async function readPersistedSelection(store: SkinRuntimeStore): Promise<string | null | undefined> {
++/** One answer of the activation endpoint: the persisted selection and background. */
++interface PersistedActive {
++  active: string | null
++  background: SkinBackgroundConfig | null
++}
++
++/** The persisted state; undefined when the endpoint cannot answer. */
++async function readPersistedActive(store: SkinRuntimeStore): Promise<PersistedActive | undefined> {
+   let res: Response
+   try {
+     res = await store.fetchImpl(`${store.apiBase}/active`)
+@@ -241,16 +277,33 @@
+     return undefined
+   }
+   if (!res.ok) return undefined
+-  let payload: { ok?: boolean; active?: unknown }
++  let payload: { ok?: boolean; active?: unknown; background?: unknown }
+   try {
+-    payload = (await res.json()) as { ok?: boolean; active?: unknown }
++    payload = (await res.json()) as { ok?: boolean; active?: unknown; background?: unknown }
+   } catch {
+     return undefined
+   }
+   if (payload.ok !== true) return undefined
+-  return typeof payload.active === 'string' && payload.active !== '' ? payload.active : null
++  const active = typeof payload.active === 'string' && payload.active !== '' ? payload.active : null
++  // A background section is an object or absent; anything else is treated as
++  // absent (defaults), the same fail-closed reading the host route does.
++  const raw = payload.background
++  const background = typeof raw === 'object' && raw !== null && !Array.isArray(raw)
++    ? raw as SkinBackgroundConfig
++    : null
++  return { active, background }
+ }
+ 
++/** True when two background configs resolve to the same applied field values. */
++function sameBackground(
++  a: SkinBackgroundConfig | null | undefined,
++  b: SkinBackgroundConfig | null | undefined,
++): boolean {
++  const left = resolveSkinBackground(a)
++  const right = resolveSkinBackground(b)
++  return SKIN_BACKGROUND_FIELDS.every((field) => left[field] === right[field])
++}
++
+ /**
+  * Converge on the skin the persisted selection names, re-reading the catalog
+  * first when the id is not in the current snapshot (a workshop install lands
+@@ -297,7 +350,7 @@
+ }
+ 
+ /**
+- * Follow the persisted selection while this page is open.
++ * Follow the persisted selection and background while this page is open.
+  *
+  * Applying a skin and saving that choice are one action in the GUI, but the
+  * choice is persisted for the NEXT page load. The conventional route is the
+@@ -307,7 +360,11 @@
+  * written twice, and this page reads it back rather than assuming it owns
+  * every write (issue #1740).
+  *
+- * The poll only reads: it never writes the selection back, it skips a value
++ * The background preferences ride the same document and the same endpoint, so
++ * a write from outside the page (the dsh-skin CLI, another window, a paired
++ * remote) converges through the one controller this page already owns.
++ *
++ * The poll only reads: it never writes either value back, it skips a value
+  * already applied, and it stops while the page is hidden.
+  * @param store - the booted runtime store.
+  * @param intervalMs - polling cadence in milliseconds.
+@@ -318,6 +375,7 @@
+   intervalMs: number = SELECTION_POLL_MS,
+ ): () => void {
+   let applied: string | null | undefined
++  let appliedBackground: SkinBackgroundConfig | null | undefined
+   // Window timers, not the ambient ones: the two are different types once
+   // Node's globals are in the program (index.ts / boot.ts both are).
+   let timer: number | null = null
+@@ -325,10 +383,24 @@
+ 
+   const tick = async (): Promise<void> => {
+     if (stopped) return
+-    const next = await readPersistedSelection(store)
+-    if (stopped || next === undefined || next === applied) return
+-    applied = next
+-    await convergeOnSelection(store, next)
++    const next = await readPersistedActive(store)
++    if (stopped || next === undefined) return
++    if (next.active !== applied) {
++      applied = next.active
++      await convergeOnSelection(store, next.active)
++    }
++    // The background baseline is what THIS follow last applied, never the
++    // controller's live value: a card edit updates the live value and only
++    // schedules its own debounced write, so comparing against the stored
++    // value would revert the edit for as long as that write is in flight.
++    // Comparing against the last applied value skips exactly that window, and
++    // once the write lands the stored value equals what the card already
++    // applied - converging on it is then a no-op. `init()` is the class's
++    // never-persisting entry point, so an apply can never echo back as a
++    // write of our own.
++    if (store.background === null || sameBackground(next.background, appliedBackground)) return
++    appliedBackground = next.background
++    store.background.init(next.background)
+   }
+ 
+   const stopTimer = (): void => {
+@@ -341,10 +413,12 @@
+   }
+ 
+   void (async () => {
+-    // Seed the baseline from the CURRENT selection without converging on it:
+-    // boot already activated it, and re-activating would restart the skin
++    // Seed the baseline from the CURRENT state without converging on it: boot
++    // already applied both values, and re-applying would restart the skin
+     // runtime's own work on every load.
+-    applied = await readPersistedSelection(store)
++    const seed = await readPersistedActive(store)
++    applied = seed?.active
++    appliedBackground = seed?.background
+     if (!stopped) startTimer()
+   })()
+ 
+--- baseline/tests/skin-selection-follow.spec.ts	2026-10-01 12:41:45
++++ patched/tests/skin-selection-follow.spec.ts	2026-10-01 12:41:45
+@@ -7,9 +7,12 @@
+  * selection is persisted for the NEXT page load, while the v2 runtime applies
+  * in place. A page that keeps running must therefore converge on writes it did
+  * not make: the workshop announcement, and the selection read back from the
+- * activation endpoint. This spec pins both paths, the catalog re-read a
+- * just-installed skin needs, and the teardown that keeps each path inside the
+- * activation that owns it.
++ * activation endpoint. That endpoint also carries the background preferences,
++ * so the same follow converges a background write made by the CLI, another
++ * window or a paired remote. This spec pins both paths, the catalog re-read a
++ * just-installed skin needs, the feedback rules the background follow must
++ * keep, and the teardown that keeps each path inside the activation that owns
++ * it.
+  */
+ 
+ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+@@ -19,8 +22,10 @@
+   trackSkinAppliedEvents,
+   watchPersistedSelection,
+   type CatalogSkin,
++  type SkinBackgroundTarget,
+   type SkinRuntimeStore,
+ } from '../src/client/runtime/boot.ts'
++import { resolveSkinBackground, type SkinBackgroundConfig } from '../src/core/background.ts'
+ 
+ const API = '/api/skin-center/v2'
+ 
+@@ -30,20 +35,62 @@
+   manifest: { id, name: id, nameEn: id, contributes: { stylesheet: 'skin.css' } },
+ } as CatalogSkin)
+ 
+-/** One activation-endpoint answer, shaped like the host route. */
+-function activeAnswer(active: () => string | null): typeof fetch {
+-  return (async () => new Response(JSON.stringify({ ok: true, active: active() }), {
++/**
++ * One activation-endpoint answer, shaped like the host route: the persisted
++ * selection and the persisted background section (null when none is stored).
++ */
++function activeAnswer(
++  active: () => string | null,
++  background: () => SkinBackgroundConfig | null = () => null,
++): typeof fetch {
++  return (async () => new Response(JSON.stringify({ ok: true, active: active(), background: background() }), {
+     status: 200,
+     headers: { 'content-type': 'application/json' },
+   })) as unknown as typeof fetch
+ }
+ 
+ /**
++ * A stand-in for the page's own BackgroundController: records every init() and
++ * holds the applied values, so a test can tell a convergence from a revert.
++ */
++function fakeBackground(initial: SkinBackgroundConfig | null = null): {
++  handle: SkinBackgroundTarget
++  inits: Array<SkinBackgroundConfig | null>
++  live: () => Required<SkinBackgroundConfig>
++  edit: (patch: SkinBackgroundConfig) => void
++} {
++  const inits: Array<SkinBackgroundConfig | null> = []
++  let live = resolveSkinBackground(initial)
++  return {
++    handle: {
++      init: (next: SkinBackgroundConfig | null) => {
++        inits.push(next)
++        live = resolveSkinBackground(next)
++      },
++    },
++    inits,
++    live: () => live,
++    /** A card edit: the live value moves immediately, its debounced POST has not landed. */
++    edit: (patch: SkinBackgroundConfig) => { live = resolveSkinBackground({ ...live, ...patch }) },
++  }
++}
++
++/** Drive the document's visibility the way the follow observes it. */
++function setVisibility(state: 'visible' | 'hidden'): void {
++  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
++  document.dispatchEvent(new Event('visibilitychange'))
++}
++
++/**
+  * A runtime store stand-in: the converge paths only read the document, the
+  * window and the fetch seat off the store and drive its controller, so this
+  * fake records the switches it was asked for instead of loading stylesheets.
+  */
+-function fakeStore(options: { catalog?: CatalogSkin[]; fetchImpl?: typeof fetch } = {}): {
++function fakeStore(options: {
++  catalog?: CatalogSkin[]
++  fetchImpl?: typeof fetch
++  background?: SkinBackgroundTarget
++} = {}): {
+   store: SkinRuntimeStore
+   switched: string[]
+   catalogRefreshes: () => number
+@@ -60,6 +107,7 @@
+     window,
+     apiBase: API,
+     fetchImpl: options.fetchImpl ?? activeAnswer(() => null),
++    background: options.background ?? null,
+     catalog: () => catalog,
+     diagnostics: () => [],
+     refreshCatalog: async () => { refreshes += 1 },
+@@ -78,6 +126,7 @@
+ 
+ afterEach(() => {
+   vi.useRealTimers()
++  delete (document as { visibilityState?: unknown }).visibilityState
+ })
+ 
+ describe('applied-skin convergence (issue #1740)', () => {
+@@ -192,5 +241,150 @@
+       expect(document.head.querySelector('link[href*="whale-song/stylesheet"]')?.getAttribute('href')).toBe(`${API}/skins/whale-song/stylesheet`)
+     })
+     store.shutdown()
++  })
++})
++
++describe('persisted background convergence', () => {
++  it('a background write from outside this page converges through the page controller', async () => {
++    vi.useFakeTimers()
++    // Given a page whose background controller shows the persisted value
++    let persisted: SkinBackgroundConfig | null = { backgroundOpacity: 10 }
++    const background = fakeBackground({ backgroundOpacity: 10 })
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => 'mint', () => persisted),
++      catalog: [catalogSkin('mint')],
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++    // The seed never converges: boot already applied the stored value
++    expect(background.inits).toEqual([])
++
++    // When something else writes a different background (the dsh-skin CLI)
++    persisted = { backgroundOpacity: 40, bubbleBlur: 3 }
++    await vi.advanceTimersByTimeAsync(2500)
++
++    // Then the open page converges on it instead of waiting for a reload
++    expect(background.inits).toEqual([{ backgroundOpacity: 40, bubbleBlur: 3 }])
++    expect(background.live().backgroundOpacity).toBe(40)
++    expect(background.live().bubbleBlur).toBe(3)
++    stop()
++  })
++
++  it('clearing the background elsewhere returns the page to the documented defaults', async () => {
++    vi.useFakeTimers()
++    // Given a page showing a customized background
++    let persisted: SkinBackgroundConfig | null = { backgroundOpacity: 40, bubbleBlur: 3 }
++    const background = fakeBackground(persisted)
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => null, () => persisted),
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++
++    // When the section is dropped (dsh-skin bg reset) so the endpoint answers null
++    persisted = null
++    await vi.advanceTimersByTimeAsync(2500)
++
++    // Then the page applies the defaults rather than keeping the stale values
++    expect(background.inits).toEqual([null])
++    expect(background.live().backgroundOpacity).toBe(0)
++    expect(background.live().bubbleBlur).toBe(10)
++    stop()
+   })
++
++  it('a hidden page does not converge and catches up when it is visible again', async () => {
++    vi.useFakeTimers()
++    let persisted: SkinBackgroundConfig | null = { backgroundOpacity: 10 }
++    const background = fakeBackground({ backgroundOpacity: 10 })
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => null, () => persisted),
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++
++    // When the page is hidden while something else writes
++    setVisibility('hidden')
++    persisted = { backgroundOpacity: 40 }
++    await vi.advanceTimersByTimeAsync(10_000)
++
++    // Then no poll ran, and becoming visible again converges on the write
++    expect(background.inits).toEqual([])
++    setVisibility('visible')
++    await vi.advanceTimersByTimeAsync(0)
++    expect(background.inits).toEqual([{ backgroundOpacity: 40 }])
++    expect(background.live().backgroundOpacity).toBe(40)
++    stop()
++  })
++
++  it('an edit still in flight is not reverted by the follow', async () => {
++    vi.useFakeTimers()
++    // Given a page whose card just moved a slider; its debounced POST has not landed
++    const persisted: SkinBackgroundConfig = { backgroundOpacity: 10 }
++    const background = fakeBackground({ backgroundOpacity: 10 })
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => null, () => persisted),
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++    background.edit({ backgroundOpacity: 40 })
++
++    // When a poll runs before that write lands
++    await vi.advanceTimersByTimeAsync(2500)
++
++    // Then the poll must not put the stored value back over the user's edit
++    expect(background.inits).toEqual([])
++    expect(background.live().backgroundOpacity).toBe(40)
++
++    // And once the write lands the page is already showing it
++    persisted.backgroundOpacity = 40
++    await vi.advanceTimersByTimeAsync(2500)
++    expect(background.live().backgroundOpacity).toBe(40)
++    stop()
++  })
++
++  it('an unchanged background is not re-applied on every poll', async () => {
++    vi.useFakeTimers()
++    // Given a page following a persisted background
++    const background = fakeBackground({ backgroundOpacity: 10 })
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => null, () => ({ backgroundOpacity: 10 })),
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++
++    // When several polls pass with the background unchanged
++    await vi.advanceTimersByTimeAsync(10_000)
++
++    // Then the controller is never asked to apply what it already shows
++    expect(background.inits).toEqual([])
++    stop()
++  })
++
++  it('a page booted without a background controller still follows the selection', async () => {
++    vi.useFakeTimers()
++    // Given a store whose page owns no background controller (the field is null)
++    let persisted = 'mint'
++    let storedBackground: SkinBackgroundConfig | null = { backgroundOpacity: 10 }
++    const { store, switched } = fakeStore({
++      catalog: [catalogSkin('mint'), catalogSkin('harbor')],
++      fetchImpl: activeAnswer(() => persisted, () => storedBackground),
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++
++    // When both the selection and the background change elsewhere
++    persisted = 'harbor'
++    storedBackground = { backgroundOpacity: 40 }
++    await vi.advanceTimersByTimeAsync(2500)
++
++    // Then the selection still converges, and the follow leaves the missing
++    // controller alone rather than dereferencing it
++    expect(switched).toEqual(['harbor'])
++    stop()
++  })
+ })

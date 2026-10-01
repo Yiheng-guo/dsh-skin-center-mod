@@ -33,6 +33,8 @@ import { fileURLToPath } from 'node:url'
 import { validateSkinManifestV2 } from './core/manifest-v2/validate.ts'
 import type { SkinManifestV2 } from './core/manifest-v2/types.ts'
 import { auditTokenContract, type TokenAuditStylesheet } from './core/css-safety/token-audit.ts'
+import { parseSkinTuning, TUNING_FILENAME } from './core/tuning.ts'
+import type { SkinTuning, SkinTuningParse } from './core/tuning.ts'
 import { resolveHarnessHome } from './harness-home.ts'
 import {
   repairSkinFromMarket,
@@ -46,6 +48,25 @@ import {
 
 export type SkinOrigin = 'builtin' | 'user'
 
+/**
+ * Read a skin's optional `tuning.json`.
+ *
+ * Absent file yields null (the common case, and it must stay free). A file that
+ * is present but unusable yields a parse carrying problems and a null tuning, so
+ * the caller reports it on the catalog and the skin behaves exactly as it would
+ * without the file.
+ */
+function readSkinTuning(dir: string): SkinTuningParse | null {
+  const file = join(dir, TUNING_FILENAME)
+  if (!existsSync(file)) return null
+  try {
+    return parseSkinTuning(JSON.parse(readFileSync(file, 'utf8')))
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    return { tuning: null, problems: [`${TUNING_FILENAME} is not valid JSON: ${reason}`] }
+  }
+}
+
 export interface SkinCatalogEntry {
   /** Validated v2 manifest (immutable; do not mutate). */
   manifest: SkinManifestV2
@@ -54,6 +75,13 @@ export interface SkinCatalogEntry {
   dir: string
   /** Non-fatal notes (deprecated v1 fields ignored, shadowing, etc). */
   warnings: string[]
+  /**
+   * The skin's own `tuning.json`, when it ships one and it parses. Consumed
+   * two ways: recommended background values (used only while the user has not
+   * configured the background controls) and scoped token overrides. See
+   * `src/core/tuning.ts` for why this is a sidecar rather than a manifest field.
+   */
+  tuning?: SkinTuning
   /**
    * True when a user-directory skin's declared hooks identity matched
    * official-market provenance or the generated reviewed legacy identity at
@@ -263,7 +291,22 @@ function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<stri
     // sets); surface it on the catalog so third-party skins show their gaps.
     const contractWarnings = auditTokenContract(stylesheetEntries(manifest, dir))
     warnings.push(...contractWarnings.warnings)
-    const entry: SkinCatalogEntry = { manifest, origin: spec.origin, dir, warnings, ...(trust.trusted ? { hooksTrusted: true } : {}) }
+    // Optional per-skin tuning sidecar: the skin's own recommended background
+    // values plus scoped token overrides. Deliberately a sidecar rather than a
+    // skin.json field, because the v2 schema is additionalProperties:false and a
+    // new field would make the skin unreadable to every existing reader. A
+    // malformed sidecar is reported and otherwise ignored, so it can never stop
+    // a skin from installing.
+    const tuning = readSkinTuning(dir)
+    if (tuning !== null) warnings.push(...tuning.problems)
+    const entry: SkinCatalogEntry = {
+      manifest,
+      origin: spec.origin,
+      dir,
+      warnings,
+      ...(tuning?.tuning != null ? { tuning: tuning.tuning } : {}),
+      ...(trust.trusted ? { hooksTrusted: true } : {}),
+    }
     claimed.set(manifest.id, entry)
     catalog.skins.push(entry)
   }

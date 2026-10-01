@@ -231,6 +231,85 @@ describe('WallpaperController', () => {
     controller.dispose()
   })
 
+  it('degrades an undecodable video container to the author preview and reports it', () => {
+    // The browser answers '' for Matroska: mounting the <video> would show
+    // nothing, so the static-frame path must take over and say why.
+    const canPlay = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('')
+    let controller: WallpaperController | null = null
+    try {
+      const { scope } = fakeScope()
+      controller = new WallpaperController(scope)
+      controller.applySelection({
+        ...video,
+        id: 'bare/loop.mkv',
+        videoUrl: '/api/skin-center/we/media/loop.mkv',
+        previewUrl: '/api/skin-center/we/preview/loop.jpg',
+      })
+      const [media] = layers()
+      expect(canPlay).toHaveBeenCalledWith('video/x-matroska')
+      expect(media.querySelector('video')).toBeNull()
+      expect(media.querySelector('img')?.src).toContain('/api/skin-center/we/preview/loop.jpg')
+      expect(controller.activeDescriptor()?.unsupportedFeatures).toContain('video-format-unsupported')
+    } finally {
+      controller?.dispose()
+      canPlay.mockRestore()
+    }
+  })
+
+  it('mounts a live video for a container the browser can decode', () => {
+    const canPlay = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockReturnValue('probably')
+    let controller: WallpaperController | null = null
+    try {
+      controller = new WallpaperController(fakeScope().scope)
+      controller.applySelection({
+        ...video,
+        id: 'bare/clip.mp4',
+        videoUrl: '/api/skin-center/we/media/clip.mp4',
+      })
+      const [media] = layers()
+      expect(canPlay).toHaveBeenCalledWith('video/mp4')
+      expect(media.querySelector('video')?.src).toContain('/media/clip.mp4')
+      expect(media.querySelector('img')).toBeNull()
+      expect(controller.activeDescriptor()?.unsupportedFeatures).toBeUndefined()
+    } finally {
+      controller?.dispose()
+      canPlay.mockRestore()
+    }
+  })
+
+  it('does not block a video when no container can be named or no answer comes', () => {
+    // The media routes hand out opaque base64url tokens, so an extension-less
+    // URL is the normal production shape; jsdom's canPlayType answers '' to
+    // everything, which must not be read as a verdict for it.
+    const first = new WallpaperController(fakeScope().scope)
+    try {
+      first.applySelection(video)
+      expect(layers()[0]?.querySelector('video')).not.toBeNull()
+      expect(first.activeDescriptor()?.unsupportedFeatures).toBeUndefined()
+    } finally {
+      first.dispose()
+    }
+
+    // A known container with an API that cannot answer at all: still no block.
+    const canPlay = vi.spyOn(HTMLMediaElement.prototype, 'canPlayType').mockImplementation(() => {
+      throw new Error('no codec list here')
+    })
+    let second: WallpaperController | null = null
+    try {
+      second = new WallpaperController(fakeScope().scope)
+      second.applySelection({
+        ...video,
+        id: 'bare/clip.mp4',
+        videoUrl: '/api/skin-center/we/media/clip.mp4',
+      })
+      expect(layers()[0]?.querySelector('video')).not.toBeNull()
+      expect(second.activeDescriptor()?.unsupportedFeatures).toBeUndefined()
+    } finally {
+      second?.dispose()
+      canPlay.mockRestore()
+    }
+  })
+
   it('keeps a preview backdrop beneath live scenes when WebGL clears', () => {
     const { scope } = fakeScope()
     const controller = new WallpaperController(scope)
@@ -1265,6 +1344,7 @@ function fakeHandle(selection: string): {
     addDir: () => {},
     removeDir: () => {},
     activeId: () => null,
+    activeDescriptor: () => null,
     writeError: () => null,
     trying: () => false,
     subscribe: listener => {

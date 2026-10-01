@@ -1,0 +1,437 @@
+--- baseline/src/client/wallpaper.ts	2026-10-01 12:41:45
++++ patched/src/client/wallpaper.ts	2026-10-01 12:41:45
+@@ -48,6 +48,16 @@
+   previewUrl: string | null
+ }
+ 
++/**
++ * Unsupported-feature markers that make one wallpaper partial: the host's
++ * scene probe reports a project whose embedded script the renderer ignores,
++ * and the mount probe reports a video container this browser cannot decode.
++ * Both live in the same unsupportedFeatures channel so a consumer explains a
++ * degraded mount the same way for either.
++ */
++export const EMBEDDED_SCRIPT_FEATURE = 'embedded-script'
++export const VIDEO_FORMAT_UNSUPPORTED = 'video-format-unsupported'
++
+ /** The persisted wallpaper section shape. */
+ export interface WallpaperSection {
+   enabled?: boolean
+@@ -167,6 +177,13 @@
+   listDir?(path?: string): Promise<WallpaperDirListing>
+   /** The currently mounted wallpaper id (try-on included), or null. */
+   activeId(): string | null
++  /**
++   * The descriptor of the wallpaper currently on screen (try-on included), or
++   * null while nothing is mounted. The reference is stable between publishes,
++   * so the panel can read it through useSyncExternalStore and explain a
++   * degraded mount (unsupportedFeatures) instead of showing a blank.
++   */
++  activeDescriptor(): WallpaperDescriptor | null
+   /** True while a try-on mount is up. */
+   trying(): boolean
+   /**
+@@ -229,6 +246,52 @@
+ 
+ /** Max static-frame capture edge (the backdrop never needs more pixels). */
+ const FRAME_MAX_EDGE = 1920
++
++/**
++ * The video containers the host serves (the video rows of mimeFor in
++ * src/we-routes.ts), mapped to the mime type it serves them with. canPlayType
++ * must be asked about the exact type the bytes arrive as, so this mirrors the
++ * host map instead of forming a second opinion about what a container is.
++ */
++const VIDEO_MIME_BY_EXTENSION: Record<string, string> = {
++  mp4: 'video/mp4',
++  webm: 'video/webm',
++  mkv: 'video/x-matroska',
++  avi: 'video/x-msvideo',
++  mov: 'video/quicktime',
++}
++
++/**
++ * Lower-case extension of one file-ish string, or '' when it carries none.
++ * Only the last path segment counts, and only a dot that is not that segment's
++ * first character, so a directory named 'Movies.2019' cannot masquerade as one.
++ */
++function extensionOf(value: string): string {
++  const segment = value.slice(value.lastIndexOf('/') + 1)
++  const dot = segment.lastIndexOf('.')
++  return dot > 0 ? segment.slice(dot + 1).toLowerCase() : ''
++}
++
++/**
++ * The container mime of one video wallpaper, or null when nothing names a
++ * container the host serves as video.
++ *
++ * The media routes hand out base64url tokens (the base64url alphabet has no
++ * dot), so the extension of the real file survives only on the id of a library
++ * entry synthesized from a manual folder ('<dir>/<file>.mkv', see
++ * synthesizeMediaEntries in src/we-library.ts). A project id is a directory
++ * name, so it is read only when it is path-shaped; anything else stays unknown,
++ * and unknown never counts as unsupported.
++ */
++function videoMimeOf(videoUrl: string, id: string): string | null {
++  const fromUrl = VIDEO_MIME_BY_EXTENSION[extensionOf(videoUrl)]
++  if (fromUrl !== undefined) return fromUrl
++  if (id.includes('/')) {
++    const fromId = VIDEO_MIME_BY_EXTENSION[extensionOf(id)]
++    if (fromId !== undefined) return fromId
++  }
++  return null
++}
+ 
+ const MIN_VIEWPORT_SURFACE_HEIGHT = 0.9
+ const MAX_SURFACE_OVERLAY_Z_INDEX = 100
+@@ -396,6 +459,10 @@
+   /** Guard flag: suppresses readAll during applyThemeDefaults settings writes
+    *  to prevent mid-write listener cascades from resetting values. */
+   private seeding = false
++  /** canPlayType verdicts by container mime: render() runs on every settings
++   *  slider tick while a wallpaper is mounted, so the probe element is built
++   *  at most once per container. */
++  private readonly videoDecodeVerdicts = new Map<string, boolean>()
+ 
+   constructor(scope: ConfigForm<WallpaperSection>, options: WallpaperControllerOptions = {}) {
+     this.scope = scope
+@@ -498,7 +565,7 @@
+         let sceneBaseUrl: string | null = null
+         let preferSceneBase = false
+         if (payload.sceneUrl && payload.compatibility === 'partial'
+-          && payload.unsupportedFeatures?.includes('embedded-script') === true) {
++          && payload.unsupportedFeatures?.includes(EMBEDDED_SCRIPT_FEATURE) === true) {
+           try {
+             const manifestResponse = await fetchFn(payload.sceneUrl.replace('/scene-runtime/', '/scene-manifest/'))
+             const manifestPayload = manifestResponse.ok
+@@ -642,6 +709,10 @@
+   activeId = (): string | null => {
+     const current = this.previewing ?? this.applied
+     return this.mediaLayer !== null && current !== null ? current.id : null
++  }
++  activeDescriptor = (): WallpaperDescriptor | null => {
++    const current = this.previewing ?? this.applied
++    return this.mediaLayer !== null && current !== null ? current : null
+   }
+   trying = (): boolean => this.previewing !== null
+   writeError = (): string | null => this.writeErrorValue
+@@ -932,14 +1003,80 @@
+   /** Reconcile the DOM with (enabled, previewing ?? applied, mode, dim, blur). */
+   private render(): void {
+     if (this.disposed) return
++    // Fold a container this browser cannot decode into the mounted descriptor
++    // before the media key is derived from it: the mount below degrades to the
++    // author preview, and without the marker the panel could only show the
++    // fallback with no explanation.
++    const annotated = this.annotateUndecodableVideo()
+     const current = this.enabledValue ? (this.previewing ?? this.applied) : null
+     if (current === null) {
+       this.teardownLayers()
++      if (annotated) this.publish()
+       return
+     }
+     this.ensureLayers(current)
++    // sync() and the mount observer are the only callers that do not publish
++    // themselves; a descriptor that just gained the marker needs one.
++    if (annotated) this.publish()
+   }
+ 
++  /**
++   * Report a video container this browser cannot decode as an unsupported
++   * feature of the mounted descriptor. The scene path already answers
++   * 'embedded-script' this way when it can only replay part of a wallpaper; a
++   * refused container is the same kind of partial result, and the panel needs
++   * the marker to explain the static frame it is looking at.
++   * @returns true when the descriptor changed, so listeners must re-read it.
++   */
++  private annotateUndecodableVideo(): boolean {
++    const current = this.previewing ?? this.applied
++    if (current === null || current.type !== 'video' || current.videoUrl === null) return false
++    if (current.unsupportedFeatures?.includes(VIDEO_FORMAT_UNSUPPORTED) === true) return false
++    if (this.canDecodeVideo(current) !== false) return false
++    const annotated: WallpaperDescriptor = {
++      ...current,
++      unsupportedFeatures: [...(current.unsupportedFeatures ?? []), VIDEO_FORMAT_UNSUPPORTED],
++    }
++    // Replace only the slot that owns the mounted descriptor: a try-on preview
++    // and the applied selection can be different wallpapers.
++    if (this.previewing === current) this.previewing = annotated
++    else this.applied = annotated
++    return true
++  }
++
++  /**
++   * Whether this browser can decode one video descriptor's container: true when
++   * canPlayType answers 'probably'/'maybe', false when it answers '' (the
++   * browser refusing the type), null when nothing can answer.
++   *
++   * The probe element is never given a source, so this asks the browser without
++   * adding a request for a file that may already be streaming. Every answer
++   * that is not a positive one is also not a verdict: an extension the host
++   * does not serve as video, a missing API or a throwing one all answer null,
++   * which callers must read as "keep the existing behaviour" — the fallback may
++   * never become a new failure mode (jsdom ships a canPlayType that answers ''
++   * to everything).
++   */
++  private canDecodeVideo(descriptor: WallpaperDescriptor): boolean | null {
++    const mime = videoMimeOf(descriptor.videoUrl ?? '', descriptor.id)
++    if (mime === null) return null
++    const cached = this.videoDecodeVerdicts.get(mime)
++    if (cached !== undefined) return cached
++    const probe = this.doc.createElement('video')
++    if (typeof probe.canPlayType !== 'function') return null
++    let verdict: boolean | null
++    try {
++      const answer = probe.canPlayType(mime)
++      verdict = answer === 'probably' || answer === 'maybe' ? true : answer === '' ? false : null
++    } catch {
++      return null
++    }
++    // Only a definite answer is cached; an API that could not answer is not
++    // evidence that it never will.
++    if (verdict !== null) this.videoDecodeVerdicts.set(mime, verdict)
++    return verdict
++  }
++
+   private ensureLayers(descriptor: WallpaperDescriptor): void {
+     // The stock shell paints opaque backgrounds on the app root and on the
+     // composer seat, which fully cover the negative-z wallpaper layers
+@@ -1116,7 +1253,15 @@
+   /** Build the cover child for one descriptor + mode; null when unrenderable. */
+   private buildMedia(descriptor: WallpaperDescriptor): HTMLElement | null {
+     if (descriptor.type === 'video') {
+-      if (this.modeValue === 'live' && descriptor.videoUrl !== null) {
++      // A container the browser refuses ('' from canPlayType) must never be
++      // mounted as live video: Chromium cannot decode Matroska or AVI at all,
++      // and a QuickTime file depends on the codec inside it, so the mount would
++      // show nothing (or quietly swap in the author preview) with no
++      // explanation. The existing static-frame path takes over instead; the
++      // descriptor already carries the reason (annotateUndecodableVideo). A
++      // container nothing can answer for (null) keeps the previous behaviour.
++      if (this.modeValue === 'live' && descriptor.videoUrl !== null
++        && this.canDecodeVideo(descriptor) !== false) {
+         return this.buildVideo(descriptor.videoUrl)
+       }
+       if (descriptor.videoUrl !== null) {
+@@ -1141,7 +1286,11 @@
+       return this.buildImage(descriptor.previewUrl)
+     }
+     if (descriptor.type === 'scene') {
+-      if (this.modeValue === 'live' && descriptor.videoUrl !== null) {
++      // Same container verdict as a video wallpaper: a scene whose embedded
++      // video cannot be decoded keeps its scene runtime / static frame rather
++      // than mounting a player that shows nothing.
++      if (this.modeValue === 'live' && descriptor.videoUrl !== null
++        && this.canDecodeVideo(descriptor) !== false) {
+         return this.buildVideo(descriptor.videoUrl, descriptor.frameUrl, descriptor.previewUrl)
+       }
+       if (this.modeValue === 'live' && descriptor.sceneUrl) {
+--- baseline/src/client/WallpaperPanel.tsx	2026-10-01 12:41:45
++++ patched/src/client/WallpaperPanel.tsx	2026-10-01 12:41:45
+@@ -11,7 +11,7 @@
+  */
+ import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+-import { resolveSelection, type WallpaperDescriptor, type WallpaperHandle } from './wallpaper.ts'
++import { resolveSelection, EMBEDDED_SCRIPT_FEATURE, VIDEO_FORMAT_UNSUPPORTED, type WallpaperDescriptor, type WallpaperHandle } from './wallpaper.ts'
+ import { DirBrowserDialog } from './DirBrowserDialog.tsx'
+ import css from './skin-center.module.css'
+ import { SliderControl } from './SliderControl.tsx'
+@@ -71,6 +71,21 @@
+     case 'scene': return 'wallpaperTypeScene'
+     default: return 'wallpaperTypeApp'
+   }
++}
++
++/**
++ * Copy key naming one unsupported feature of the mounted wallpaper: the host
++ * scene probe reports a project whose embedded script the renderer ignores
++ * (EMBEDDED_SCRIPT_FEATURE) and the mount probe a video container this browser
++ * cannot decode (VIDEO_FORMAT_UNSUPPORTED). Both name a capability the user has
++ * lost, so the notice reuses the existing type copy rather than growing the
++ * locale catalog, which another part of the plugin owns; an unreviewed marker
++ * falls back to the unsupported label itself.
++ */
++function unsupportedFeatureKey(feature: string): 'wallpaperTypeVideo' | 'wallpaperTypeScene' | 'wallpaperTypeApp' {
++  if (feature === VIDEO_FORMAT_UNSUPPORTED) return 'wallpaperTypeVideo'
++  if (feature === EMBEDDED_SCRIPT_FEATURE) return 'wallpaperTypeScene'
++  return 'wallpaperTypeApp'
+ }
+ 
+ /** Wallpaper grid page size (24 items per page). */
+@@ -113,6 +128,7 @@
+   const sound = useSyncExternalStore(wallpaper.subscribe, wallpaper.sound)
+   const volume = useSyncExternalStore(wallpaper.subscribe, wallpaper.volume)
+   const activeId = useSyncExternalStore(wallpaper.subscribe, wallpaper.activeId)
++  const activeDescriptor = useSyncExternalStore(wallpaper.subscribe, wallpaper.activeDescriptor)
+   const trying = useSyncExternalStore(wallpaper.subscribe, wallpaper.trying)
+   const dirs = useSyncExternalStore(wallpaper.subscribe, wallpaper.dirs)
+   const writeError = useSyncExternalStore(wallpaper.subscribe, wallpaper.writeError)
+@@ -226,6 +242,10 @@
+     webUrl: item.webUrl,
+     frameUrl: item.frameUrl,
+     sceneUrl: item.sceneUrl,
++    sceneCompatibility: item.sceneCompatibility,
++    unsupportedFeatures: item.unsupportedFeatures,
++    sceneBaseUrl: item.sceneBaseUrl,
++    preferSceneBase: item.preferSceneBase,
+     previewUrl: item.previewUrl,
+   })
+ 
+@@ -253,6 +273,7 @@
+   }
+ 
+   const activeSelection = selection
++  const unsupportedFeatures = activeDescriptor?.unsupportedFeatures ?? []
+ 
+   return (
+     <div className={css.wallpaperSection}>
+@@ -283,6 +304,15 @@
+             <button type="button" className={css.button} onClick={load}>{t('wallpaperRefresh')}</button>
+           </div>
+ 
++          {unsupportedFeatures.length > 0 && (
++            <div className={css.wallpaperStatus} role="status">
++              <span className={css.badge + ' ' + css.badgeWarning}>{t('wallpaperTypeApp')}</span>
++              <span className={css.backgroundHintMuted} title={unsupportedFeatures.join(', ')}>
++                {unsupportedFeatures.map(feature => t(unsupportedFeatureKey(feature))).join(' · ')}
++              </span>
++            </div>
++          )}
++
+           {activeSelection !== '' && (
+             <div className={css.wallpaperControls}>
+               <div className={css.themeRow}>
+--- baseline/src/client/index.ts	2026-10-01 12:41:45
++++ patched/src/client/index.ts	2026-10-01 12:41:45
+@@ -296,6 +296,9 @@
+   // flip paints immediately.
+   const runtime = bootSkinRuntime({
+     suppressBackgroundMedia: () => wallpaper.enabled() && wallpaper.isDisplaying(),
++    // The follow converges an out-of-page background write through this
++    // instance instead of building a second controller.
++    background,
+   })
+   ctx.effect(() => () => runtime.shutdown(), 'ui-skin-center: runtime shutdown')
+   // Applying a skin and saving the choice are one action in the GUI, but the
+@@ -362,6 +365,7 @@
+         return result.value
+       },
+       activeId: () => wallpaper.activeId(),
++      activeDescriptor: () => wallpaper.activeDescriptor(),
+       trying: () => wallpaper.trying(),
+       writeError: () => wallpaper.writeError(),
+       subscribe: listener => wallpaper.subscribe(listener),
+--- baseline/tests/wallpaper-panel.spec.tsx	2026-10-01 12:41:45
++++ patched/tests/wallpaper-panel.spec.tsx	2026-10-01 12:41:45
+@@ -10,7 +10,7 @@
+ import { createRoot, type Root } from 'react-dom/client'
+ import { WallpaperPanel } from '../src/client/WallpaperPanel.tsx'
+ import { zh, type SkinCenterKey } from '../src/client/locales.ts'
+-import type { WallpaperDirListing, WallpaperHandle } from '../src/client/wallpaper.ts'
++import type { WallpaperDescriptor, WallpaperDirListing, WallpaperHandle } from '../src/client/wallpaper.ts'
+ 
+ ;((globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT) = true
+ 
+@@ -36,6 +36,7 @@
+   removeDir: () => {},
+   pickDir: async () => ({ kind: 'cancelled' }),
+   activeId: () => null,
++  activeDescriptor: () => null,
+   writeError: () => null,
+   trying: () => false,
+   subscribe: () => () => {},
+@@ -163,6 +164,80 @@
+   })
+ })
+ 
++describe('WallpaperPanel unsupported features', () => {
++  /** One library item carrying every descriptor field the panel must forward. */
++  const item = {
++    id: 'bare/loop.mkv',
++    title: 'loop',
++    type: 'video',
++    source: 'local',
++    playable: true,
++    updateAvailable: false,
++    videoUrl: '/api/skin-center/we/media/AAA',
++    webUrl: null,
++    frameUrl: null,
++    sceneUrl: null,
++    previewUrl: '/api/skin-center/we/preview/BBB',
++    unsupportedFeatures: ['embedded-script'],
++    sceneCompatibility: 'partial',
++    sceneBaseUrl: '/api/skin-center/we/scene-resource/AAA/base.png',
++    preferSceneBase: true,
++  }
++
++  /** One mounted descriptor with the given unsupported markers. */
++  const mounted = (unsupportedFeatures: string[]): WallpaperDescriptor => ({
++    id: 'bare/loop.mkv',
++    title: 'loop',
++    type: 'video',
++    videoUrl: '/api/skin-center/we/media/AAA',
++    webUrl: null,
++    frameUrl: null,
++    previewUrl: '/api/skin-center/we/preview/BBB',
++    unsupportedFeatures,
++  })
++
++  it('explains the scene feature the host probe reported (embedded-script)', async () => {
++    // Cached snapshot: useSyncExternalStore loops when getSnapshot returns a
++    // fresh descriptor on every call.
++    const descriptor = mounted(['embedded-script'])
++    await render([item], stubWallpaper({ activeDescriptor: () => descriptor }))
++    const notice = host.querySelector('[role="status"]')
++    expect(notice).not.toBeNull()
++    expect(notice?.textContent).toContain(zh.wallpaperTypeApp)
++    expect(notice?.textContent).toContain(zh.wallpaperTypeScene)
++  })
++
++  it('explains a video container this browser cannot decode', async () => {
++    const descriptor = mounted(['video-format-unsupported'])
++    await render([item], stubWallpaper({ activeDescriptor: () => descriptor }))
++    const notice = host.querySelector('[role="status"]')
++    expect(notice).not.toBeNull()
++    expect(notice?.textContent).toContain(zh.wallpaperTypeApp)
++    expect(notice?.textContent).toContain(zh.wallpaperTypeVideo)
++  })
++
++  it('shows no unsupported notice for a fully supported wallpaper', async () => {
++    const descriptor = mounted([])
++    await render([item], stubWallpaper({ activeDescriptor: () => descriptor }))
++    expect(host.querySelector('[role="status"]')).toBeNull()
++  })
++
++  it('forwards the whole descriptor to the mount, unsupportedFeatures included', async () => {
++    const forwarded: WallpaperDescriptor[] = []
++    await render([item], stubWallpaper({ applySelection: descriptor => { forwarded.push(descriptor) } }))
++    await act(async () => { buttonWith(zh.apply)!.click() })
++    expect(forwarded).toHaveLength(1)
++    expect(forwarded[0]).toMatchObject({
++      id: 'bare/loop.mkv',
++      type: 'video',
++      sceneCompatibility: 'partial',
++      unsupportedFeatures: ['embedded-script'],
++      sceneBaseUrl: '/api/skin-center/we/scene-resource/AAA/base.png',
++      preferSceneBase: true,
++    })
++  })
++})
++
+ describe('WallpaperPanel directory picker', () => {
+   it('adds the picked folder directly through the native picker', async () => {
+     const added: string[] = []
+--- baseline/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:41:45
++++ patched/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:41:45
+@@ -98,6 +98,10 @@
+     enabled: () => true, selection: () => options.wallpaperSelection ?? '', mode: () => 'live', fit: () => 'cover', dim: () => 0,
+     wallpaperBlur: () => 0, wallpaperOpacity: () => 100, pauseOnHidden: () => false, sound: () => false, volume: () => 100,
+     dirs: () => noDirs, addDir: () => {}, removeDir: () => {}, activeId: () => null, trying: () => false,
++    // The wallpaper handle gained activeDescriptor with the codec preflight; the
++    // panel reads it to explain a degraded fallback, so a stub without it throws
++    // "getSnapshot is not a function" as soon as the card renders.
++    activeDescriptor: () => null,
+     writeError: () => null,
+     subscribe: () => () => {}, setEnabled: () => {}, setMode: () => {}, setFit: () => {}, setDim: () => {},
+     setBlur: () => {}, setOpacity: () => {}, setPauseOnHidden: () => {}, setSound: () => {}, setVolume: () => {},

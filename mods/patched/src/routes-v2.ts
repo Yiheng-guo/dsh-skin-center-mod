@@ -13,6 +13,9 @@
  *  - GET  /active                      the persisted active skin id + background preferences
  *  - POST /active                      persist active id and/or background (same-origin fenced)
  *  - POST /verify                      integrity report; repairs only on {"autoRepair":true}
+ *  - GET  /diagnostics                 read-only observability snapshot: catalog
+ *                                      diagnostics + per-skin warnings + the last
+ *                                      CSS transform failure per served file
  *
  * The stylesheet/patches responses pass through the CSS safety pipeline
  * (force-scoped under html[data-dsh-skin="<id>"], whitelist fail-closed), so
@@ -105,6 +108,33 @@ type SkinCssMemo = (
   filename: string,
   identity: FileIdentity,
 ) => string
+
+/**
+ * Diagnostics record of the last CSS transform failure per served file.
+ *
+ * This is an observation, never a second source of truth: the serve path keeps
+ * producing exactly the same 422/500 envelope and the same body it produced
+ * before this record existed, because the caught error is rethrown untouched.
+ */
+interface TransformFailure {
+  skinId: string
+  filename: string
+  at: number
+  /** Truncated failure message (diagnostic string, not a response body). */
+  error: string
+  /** Whitelist violations, truncated; empty for non-whitelist failures. */
+  violations: readonly string[]
+}
+
+/**
+ * Bounds on the retained failures. Keys are one per (skin, served file), so
+ * the ceiling is the installed stylesheet count; insertion order is recency,
+ * so eviction drops the least recently failed file. The per-entry caps keep a
+ * pathological selector from turning one record into a log sink.
+ */
+const TRANSFORM_FAILURE_MAX = 16
+const TRANSFORM_ERROR_CHARS = 400
+const TRANSFORM_VIOLATIONS_MAX = 8
 
 function sendCss(res: ServerResponse, status: number, code: string): void {
   res.writeHead(status, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store' })
@@ -316,6 +346,34 @@ export function makeSkinCenterV2Routes(deps: RoutesV2Deps = {}): WebRoute[] {
    * violation is re-derived and re-reported, never cached as success.
    */
   const cssCache = new Map<string, string>()
+
+  /**
+   * Last transform failure per (skin id, filename), newest write wins. The
+   * memo must never store a failure (a stale success is worse than a re-run),
+   * so the failing files are exactly the ones this map exists to name; a
+   * bounded map is what keeps that record from growing with request count.
+   */
+  const transformFailures = new Map<string, TransformFailure>()
+
+  const recordTransformFailure = (skinId: string, filename: string, error: unknown): void => {
+    const key = `${skinId}\u0000${filename}`
+    const message = error instanceof Error ? error.message : String(error)
+    const violations = error instanceof SkinCssSafetyError ? error.violations : []
+    // Delete-then-set so the first key stays the least recently failed file.
+    transformFailures.delete(key)
+    transformFailures.set(key, {
+      skinId,
+      filename,
+      at: Date.now(),
+      error: message.length > TRANSFORM_ERROR_CHARS ? message.slice(0, TRANSFORM_ERROR_CHARS) : message,
+      violations: violations.slice(0, TRANSFORM_VIOLATIONS_MAX),
+    })
+    if (transformFailures.size > TRANSFORM_FAILURE_MAX) {
+      const oldest = transformFailures.keys().next().value
+      if (oldest !== undefined) transformFailures.delete(oldest)
+    }
+  }
+
   const memoTransform: SkinCssMemo = (entry, abs, filename, identity) => {
     const key = `${entry.manifest.id}\u0000${filename}\u0000${identity.mtimeMs}\u0000${identity.size}`
     const hit = cssCache.get(key)
@@ -324,22 +382,58 @@ export function makeSkinCenterV2Routes(deps: RoutesV2Deps = {}): WebRoute[] {
       cssCache.set(key, hit)
       return hit
     }
-    // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
-    // headers reject non-Latin1 bytes and skin warnings can embed selector
-    // fragments with CJK text.
-    const { code } = transformCss(readFileSync(abs, 'utf8'), {
-      skinId: entry.manifest.id,
-      filename,
-      // Only the main stylesheet derives fallback tints; patches re-deriving
-      // from their partial token view would override the skin's real values.
-      deriveFallbacks: filename === 'skin.css',
-    })
+    let code: string
+    try {
+      // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
+      // headers reject non-Latin1 bytes and skin warnings can embed selector
+      // fragments with CJK text.
+      code = transformCss(readFileSync(abs, 'utf8'), {
+        skinId: entry.manifest.id,
+        filename,
+        // Only the main stylesheet derives fallback tints; patches re-deriving
+        // from their partial token view would override the skin's real values.
+        deriveFallbacks: filename === 'skin.css',
+      }).code
+    } catch (error) {
+      // Diagnostics ride the failure, not the response: the same error is
+      // rethrown, so the serve path answers byte-identically to before.
+      recordTransformFailure(entry.manifest.id, filename, error)
+      throw error
+    }
     cssCache.set(key, code)
     if (cssCache.size > CSS_TRANSFORM_CACHE_MAX) {
       const oldest = cssCache.keys().next().value
       if (oldest !== undefined) cssCache.delete(oldest)
     }
     return code
+  }
+
+  /**
+   * Read-only observability snapshot (the skin system's own failure state).
+   *
+   * The adapter's per-rule counters and the effect ledger's cleanup failures
+   * live in the browser, so this route carries the host half: the catalog's
+   * diagnostics and per-skin warnings exactly as /catalog already computes
+   * them, plus the last CSS transform failure per served file. It reads and
+   * writes nothing and never changes another route's answer; it is fenced like
+   * the writes so a foreign page cannot fingerprint the local install.
+   */
+  const diagnosticsHandler: WebRoute['handler'] = (req, res) => {
+    if (!requireSameOrigin(req, res)) return
+    if (req.method !== 'GET') {
+      writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
+      return
+    }
+    const catalog = loadCatalog()
+    writeJson(res, 200, {
+      ok: true,
+      capturedAt: catalog.capturedAt,
+      diagnostics: catalog.diagnostics,
+      skins: catalog.skins
+        .filter((s) => s.origin === 'user' || shippedSet.has(s.manifest.id))
+        .map((s) => ({ id: s.manifest.id, origin: s.origin, warnings: s.warnings })),
+      transformFailures: [...transformFailures.values()],
+    })
   }
 
   const catalogHandler: WebRoute['handler'] = (_req, res) => {
@@ -559,6 +653,7 @@ export function makeSkinCenterV2Routes(deps: RoutesV2Deps = {}): WebRoute[] {
 
   return [
     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/catalog`, handler: catalogHandler },
+    { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/diagnostics`, handler: diagnosticsHandler },
     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/verify`, handler: verifyHandler },
     { kind: 'prefix', path: skinPrefix.replace(/\/$/, ''), handler: skinsHandler },
     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/active`, handler: (req, res) => {

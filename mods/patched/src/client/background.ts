@@ -162,10 +162,28 @@ export class BackgroundController implements SkinBackgroundHandle {
    * @param initial - values known at construction (the local settings scope
    *   snapshot on loopback); null starts from defaults until init() arrives.
    * @param persist - persistence channel for user edits (v2 /active POST).
+   * @param recommended - the active skin's recommended values from its
+   *   `tuning.json`, consulted per field. Precedence is
+   *   default < recommendation < stored user value, so a skin's advice applies
+   *   only where the user has not spoken and clearing the stored config returns
+   *   to the advice. Deliberately a reader, never a writer: `init()` publishes
+   *   but does not persist, so merely switching skins cannot bake a
+   *   recommendation into the stored config. A genuine user edit does persist
+   *   the full snapshot, advice included — that is the user's own action, and
+   *   after it their value wins everywhere it speaks.
    */
-  constructor(initial: SkinBackgroundConfig | null, persist: (next: SkinBackgroundConfig) => void) {
+  constructor(
+    initial: SkinBackgroundConfig | null,
+    persist: (next: SkinBackgroundConfig) => void,
+    private readonly recommended: () => SkinBackgroundConfig | null | undefined = () => null,
+  ) {
     this.persist = persist
-    if (initial !== null) this.assign(initial)
+    // Assign unconditionally, including the null case: `{...recommendation}` with
+    // no stored config is exactly the defaults when the skin advises nothing, so
+    // this changes no existing behaviour, but it means a skin WITH advice is in
+    // effect from construction instead of flashing default blur until init()
+    // arrives.
+    this.assign(initial ?? {})
     this.applyOcclusion()
     this.applyInputCardBlur()
     this.applyBubbleOpacity()
@@ -295,9 +313,17 @@ export class BackgroundController implements SkinBackgroundHandle {
     }
   }
 
-  /** Copy one config into the live fields, defaults filling the gaps. */
+  /**
+   * Copy one config into the live fields.
+   *
+   * Merge order is the whole feature: the skin's recommendation fills the gaps
+   * the stored config leaves, and the stored config wins wherever it speaks.
+   * Per field, not all-or-nothing, so setting one control by hand does not
+   * discard the rest of the skin's advice.
+   */
   private assign(config: SkinBackgroundConfig): void {
-    const resolved = resolveSkinBackground(config)
+    const recommended = this.recommended() ?? {}
+    const resolved = resolveSkinBackground({ ...recommended, ...config })
     this.enabledValue = resolved.enabled
     this.opacityValue = resolved.backgroundOpacity
     this.blurEmptyValue = resolved.backgroundBlurEmpty

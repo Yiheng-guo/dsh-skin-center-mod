@@ -1,6 +1,14 @@
---- baseline/tests/background.spec.ts	2026-10-01 03:37:32
-+++ patched/tests/background.spec.ts	2026-10-01 03:37:32
-@@ -15,6 +15,7 @@
+--- baseline/tests/background.spec.ts	2026-10-01 12:41:45
++++ patched/tests/background.spec.ts	2026-10-01 12:41:45
+@@ -7,6 +7,7 @@
+  * client wiring uses.
+  */
+ import { beforeEach, describe, expect, it } from 'vitest'
++import { SKIN_BACKGROUND_DEFAULTS } from '../src/core/background.ts'
+ import type { SkinBackgroundConfig } from '../src/core/background.ts'
+ import {
+   BackgroundController,
+@@ -15,6 +16,7 @@
    SCRIM_VAR,
    INPUT_CARD_BLUR_VAR,
  } from '../src/client/background.ts'
@@ -8,7 +16,7 @@
  
  /** A recording persist callback plus the controller built over it. */
  function rig(initial: SkinBackgroundConfig | null = null): {
-@@ -26,12 +27,22 @@
+@@ -26,12 +28,22 @@
    return { controller, writes }
  }
  
@@ -34,7 +42,7 @@
  /** Flush the MutationObserver's coalesced rAF recheck. */
  async function flush(): Promise<void> {
    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
-@@ -47,14 +58,23 @@
+@@ -47,14 +59,23 @@
    document.body.appendChild(pane)
  }
  
@@ -59,7 +67,7 @@
    document.body.querySelectorAll('[data-chat-anchor-key]').forEach(node => node.remove())
  }
  
-@@ -72,8 +92,55 @@
+@@ -72,8 +93,55 @@
      controller.dispose()
    })
  
@@ -117,7 +125,7 @@
      controller.setBlurEmpty(6)
      const element = blurElement()
      expect(element).not.toBeNull()
-@@ -110,6 +177,29 @@
+@@ -110,6 +178,29 @@
      controller.dispose()
    })
  
@@ -147,3 +155,55 @@
    it('removes the element when the active value becomes 0, and dispose leaves nothing', () => {
      const { controller } = rig({ backgroundBlurEmpty: 4 })
      expect(blurElement()).not.toBeNull()
+@@ -260,3 +351,51 @@
+     controller.dispose()
+   })
+ })
++
++describe('BackgroundController skin recommendation', () => {
++  // Precedence is the whole feature: default < skin recommendation < stored user
++  // value, merged per field. A skin ships advice in its tuning.json sidecar; it
++  // must apply only where the user has not spoken, and must never need its own
++  // state flag to know whether it has been applied.
++
++  it('fills the gaps with the active skin recommendation, per field', () => {
++    const recommended = { backgroundOpacity: 45, backgroundBlurContent: 12, inputCardBlur: 4 }
++    const controller = new BackgroundController(null, () => {}, () => recommended)
++    expect(controller.opacity()).toBe(45)
++    expect(controller.blurContent()).toBe(12)
++    expect(controller.inputCardBlur()).toBe(4)
++    // A field the skin says nothing about still comes from the defaults.
++    expect(controller.bubbleBlur()).toBe(SKIN_BACKGROUND_DEFAULTS.bubbleBlur)
++    controller.dispose()
++  })
++
++  it('lets one stored field win without discarding the rest of the advice', () => {
++    const controller = new BackgroundController(null, () => {}, () => ({
++      backgroundOpacity: 45,
++      backgroundBlurContent: 12,
++      inputCardBlur: 4,
++    }))
++    controller.init({ inputCardBlur: 0 })
++    expect(controller.inputCardBlur()).toBe(0)
++    expect(controller.opacity()).toBe(45)
++    expect(controller.blurContent()).toBe(12)
++    controller.dispose()
++  })
++
++  it('returns to the recommendation when the stored config is cleared', () => {
++    const controller = new BackgroundController(null, () => {}, () => ({ inputCardBlur: 4 }))
++    controller.init({ inputCardBlur: 18 })
++    expect(controller.inputCardBlur()).toBe(18)
++    // What `dsh-skin bg reset` produces: no stored fields at all.
++    controller.init({})
++    expect(controller.inputCardBlur()).toBe(4)
++    controller.dispose()
++  })
++
++  it('falls back to the documented defaults for a skin with no recommendation', () => {
++    const controller = new BackgroundController(null, () => {}, () => null)
++    expect(controller.inputCardBlur()).toBe(SKIN_BACKGROUND_DEFAULTS.inputCardBlur)
++    expect(controller.opacity()).toBe(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity)
++    controller.dispose()
++  })
++})

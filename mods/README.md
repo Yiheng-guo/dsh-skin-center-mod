@@ -1,11 +1,11 @@
 # mods — patches against `@linxin666/dsh-client-ui-skin-center` v0.4.4
 
-Nine unified diffs against **pristine upstream source**, with the pristine files
+Thirteen unified diffs against **pristine upstream source**, with the pristine files
 kept alongside so every change is reviewable without cloning upstream.
 
 ```
 baseline/   pristine upstream files, exactly as published
-patched/    the same files with all nine patches applied
+patched/    the same files with all thirteen patches applied
 *.patch     diff -u baseline/... patched/...
 ```
 
@@ -22,6 +22,10 @@ patch -p1 < mods/06-stylesheet-link-leak.patch
 patch -p1 < mods/07-provenance-hygiene.patch
 patch -p1 < mods/08-http-caching-and-integrity.patch
 patch -p1 < mods/09-frost-and-detector-consistency.patch
+patch -p1 < mods/10-skin-tuning-sidecar.patch
+patch -p1 < mods/11-cli-background-and-live-follow.patch
+patch -p1 < mods/12-adapter-diagnostics-counters.patch
+patch -p1 < mods/13-wallpaper-codec-preflight.patch
 ```
 
 `-p1` because the diffs carry the `src/…` / `tests/…` prefix, not a leading
@@ -256,6 +260,104 @@ suffix the old selector covered is retained in both scopes.
 
 ---
 
+## 10-skin-tuning-sidecar.patch — `src/core/tuning.ts` (new), `tests/tuning.spec.ts` (new)
+
+**What it adds.** A skin may ship `tuning.json` next to its `skin.json` carrying
+its own recommended background values and scoped `--token` overrides.
+
+**Why a sidecar and not a `skin.json` field.** The v2 manifest schema is
+`additionalProperties: false`, so an unknown field is a HARD validation error.
+A skin using a new field would therefore be rejected outright by every
+skin-center build that does not know it — including the official one. A sidecar
+carries the same information, stays invisible to every other reader, and keeps
+the repository's invariant that a skin is pure data.
+
+**Token values are injected into a stylesheet, so they fail closed.** `;`, `{}`,
+`<>`, `\`, `/*`, `@` and `url(` are rejected per value, along with control
+characters, empty values and anything over 160 characters. A rejected value is
+reported on the catalog rather than silently dropped.
+
+**Merge precedence, with no new state flag.** The applied background config is
+`{...defaults, ...skin recommendation, ...stored user value}`, per field. So a
+skin's advice applies only where the user has not spoken, a user value always
+wins, and `dsh-skin bg reset` returns to the skin's recommendation. `init()` is
+the controller's externally-sourced, never-persisting entry point, so merely
+switching skins cannot bake a recommendation into the stored config.
+
+## 11-cli-background-and-live-follow.patch — `scripts/dsh-skin.cjs`, `src/client/runtime/boot.ts`, `src/index.ts` via patch 04
+
+**`dsh-skin bg get|set|reset`.** Background settings live in the same state file
+as the selection but the library re-exported only the selection accessors, so the
+CLI could not reach them. `get` prints each field with its resolved value and
+whether it is explicitly set or still at its documented default (so an explicit
+`0` is distinguishable from never-set). `set` merge-writes through the same
+`normalizeSkinBackground` the HTTP surface uses, so out-of-range input is clamped
+rather than rejected, and unparseable input exits 1 with a specific message.
+`reset` removes the `background` key entirely, which is what makes it return to
+the active skin's recommendation rather than to explicit defaults.
+
+**Live background follow.** `watchPersistedSelection` polled the persisted
+selection and converged an open page on an out-of-page write, but it read ONLY
+the selection — so a background write from the CLI or another window needed a
+reload. The follow now reads `{active, background}` from the same GET and
+converges both, with the same discipline: read-only, skips a value already
+applied, stops while the page is hidden, and never fights an edit in flight. It
+keeps its own cursor — the last value IT applied — so a card edit that has not
+been POSTed yet is not reverted, and an apply cannot echo back as a write.
+
+**The CLI's advice was wrong.** `dsh-skin use` printed "reload the GUI to apply"
+while the follow makes it land within the poll interval. Corrected.
+
+## 12-adapter-diagnostics-counters.patch — `src/client/runtime/semantic-adapter.ts`, `tests/semantic-adapter.spec.ts`
+
+**This patch fixes a page-hanging bug that the counters exposed.**
+
+The adapter's observer treats an attribute record as "a glyph arrived" and
+re-runs the rule table over the changed node's ancestor chain. Its own stamps
+produce attribute records too, so the pass re-entered the pass that produced it —
+and the table contains more than one rule claiming `data-dsh-part`, so two rules
+overwrote each other's value forever. The observer callback never returned, the
+microtask queue starved, and **any attribute write on an already-stamped element
+froze the page**. Reproduced with a probe whose second macrotask never fired.
+
+Fix: react only to attribute records for names this adapter does NOT write. The
+signal the path exists for is a HOST anchor appearing (a re-render that flips
+`data-slot` instead of replacing the node), and host anchors are never names the
+adapter writes, so every real case survives and only the echo is dropped.
+
+`tagged` also counted WRITES. Because two rules can claim the same attribute on
+the same element, one element can be stamped twice — a re-tag, not a second
+element. It now counts distinct elements, with the per-pass set cleared on each
+full pass so the counter cannot pin detached nodes.
+
+> The card UI that consumed these counters is **withdrawn** (see below), so this
+> patch ships the adapter half only.
+
+## 13-wallpaper-codec-preflight.patch — `wallpaper.ts`, `WallpaperPanel.tsx`, `index.ts`, two specs
+
+**The defect.** A wallpaper whose file extension is a video was typed `video` and
+mounted in a `<video>` element, but the host classifies by extension alone and
+Chromium cannot decode `.mkv` or `.avi` at all, while `.mov` depends entirely on
+the codec inside. The wallpaper mounted, showed nothing, and gave no reason.
+
+**The fix.** Probe `HTMLVideoElement.canPlayType(mime)` (mime mapped from the
+extension using the same table the host serves bytes with) before mounting. When
+the answer is `''` the wallpaper degrades to the existing static-frame path and
+the reason rides the established `unsupportedFeatures` channel as
+`video-format-unsupported`. When no container can be named, or the API is absent
+or throws, the wallpaper mounts exactly as before — a strict improvement, never a
+new failure mode. The probe element gets no `src`, so it costs no request, and
+verdicts are cached per mime because `render()` runs on every slider tick.
+
+**A second, pre-existing bug fixed here.** `WallpaperPanel`'s `descriptorOf`
+dropped `unsupportedFeatures` (and three other fields) entirely, so the EXISTING
+host reason `embedded-script` never reached the UI either. It now forwards the
+whole descriptor, exposes the mounted descriptor, and renders a notice.
+
+**Integration note.** Adding `activeDescriptor` to the wallpaper handle broke
+every spec that stubbed the handle without it (`getSnapshot is not a function`).
+`tests/skin-center-custom-theme.spec.tsx` is updated in this patch.
+
 ## Verification
 
 Run in an upstream checkout with the patches applied:
@@ -263,7 +365,7 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 652 passed / 15 failed — **zero regressions**, see below |
+| `pnpm test` | 691 passed / 15 failed — **zero regressions**, see below |
 | `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
@@ -271,7 +373,7 @@ Controlled experiment, both runs in the identical `skins/` state:
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 667 | 15 | **652** |
+| these patches | 706 | 15 | **691** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
@@ -279,11 +381,11 @@ Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository'
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
 checkout. **Zero AssertionError / TypeError / ReferenceError** on both sides of the
-experiment. The 28 added tests all pass (652 − 624), and every fix in this series
+experiment. The 67 added tests all pass (691 − 624), and every fix in this series
 was individually proven to fail when its source change is reverted.
 
-Reproducibility: applying the nine patches to the pristine files reproduces
-`patched/` byte-for-byte (21 files, one of them new).
+Reproducibility: applying the thirteen patches to the pristine files reproduces
+`patched/` byte-for-byte (34 files, three of them new).
 
 ## Not included
 
@@ -299,3 +401,38 @@ overlooked:
   analysis, not an optimisation of existing code.
 - **Anchor robustness** across host rebuilds — an architectural change to the
   semantic adapter, and the largest item on the list.
+
+## Withdrawn, and what is still open
+
+Recorded here rather than quietly dropped, because both affect what this patch
+set actually delivers.
+
+**Withdrawn: the skin-health card UI.** The card surface that consumed the
+diagnostics (a collapsible "skin health" section) rendered into an infinite
+update loop (`Maximum update depth exceeded`). The cause was traced in part to a
+test stub returning a fresh `getSnapshot` object on every call — the very trap
+the controller documents — but fixing the stub did not stop the loop, and the
+implementation could not be verified within the time available. Rather than ship
+a settings card that hangs the page, `SkinCenter.tsx`, `locales.ts` and
+`skin-center.module.css` are reverted to pristine. What ships is the adapter
+half: per-rule counters plus `GET /v2/diagnostics` (patch 08). Re-adding the card
+surface needs a fresh implementation, not a rebase of the withdrawn one.
+
+**Open: the recommendation half of the sidecar.** `tuning.json`'s `tokens` are
+fully consumed (patch 06 applies them scoped; patch 10 parses them). Its
+`background` block is parsed, validated, exposed on the catalog entry, and the
+controller can merge it (`{...defaults, ...recommendation, ...stored}`, patch 01),
+but **nothing yet feeds the recommendation into the controller**, so the
+background half is inert. The remaining step is small and its shape is known:
+push the active entry's `tuning.background` into the controller whenever the
+active skin resolves (the follow in patch 11 already sees `active` on every
+tick), and add the "restore skin defaults" affordance.
+
+**Not attempted, with reasons.** F18's D3 (bind a WE preview token to a file
+rather than a directory, and stop `/web/` following symlinks) — a real security
+gap, but only reachable on the Wallpaper Engine paths, which are Windows-only
+(verified: `we-library.ts` returns null/[] when `process.platform !== 'win32'`).
+F19 (WE texture cache) likewise Windows-only. F11 (lazy observers) is a
+trade-off needing a measurement, not a defect. F21's architectural rewrite is out
+of scope; only its "make anchor rot visible" subset is addressed, by the
+counters.

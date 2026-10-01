@@ -1,5 +1,5 @@
---- baseline/src/client/background.ts	2026-10-01 03:37:31
-+++ patched/src/client/background.ts	2026-10-01 03:37:31
+--- baseline/src/client/background.ts	2026-10-01 12:41:45
++++ patched/src/client/background.ts	2026-10-01 12:41:45
 @@ -34,6 +34,10 @@
    SKIN_BACKGROUND_DEFAULTS,
    type SkinBackgroundConfig,
@@ -26,12 +26,10 @@
  
  /** Default occlusion (0 = no extra veil) when the section carries none. */
  export const DEFAULT_OPACITY = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
-@@ -115,22 +123,6 @@
-   /** Tear down the blur element and MutationObserver. */
-   dispose(): void
+@@ -117,22 +125,6 @@
  }
--
--/**
+ 
+ /**
 - * Selector for a conversation message row inside the shell's center column.
 - * Official shell message rows carry `data-chat-anchor-key`; the
 - * `data-pane="conversation"` attribute is stamped by the dsh-web-all compat
@@ -46,9 +44,11 @@
 -  '[data-pane="conversation"] [class*="_contextRow"]',
 -  '[data-pane="conversation"] [class*="_turnErrorRow"]',
 -].join(', ')
- 
- /**
+-
+-/**
   * Own the background preference set: apply the values to the body instantly
+  * and persist user edits through the caller-provided channel.
+  */
 @@ -150,6 +142,15 @@
    private blurElement: HTMLDivElement | null = null
    /** Currently applied backdrop-filter blur px (cached to avoid redundant style writes during streaming). */
@@ -65,7 +65,39 @@
    /** The body MutationObserver, installed lazily once a blur is active. */
    private observer: MutationObserver | null = null
    /** Pending requestAnimationFrame id for a coalesced recheck. */
-@@ -283,6 +284,8 @@
+@@ -161,10 +162,28 @@
+    * @param initial - values known at construction (the local settings scope
+    *   snapshot on loopback); null starts from defaults until init() arrives.
+    * @param persist - persistence channel for user edits (v2 /active POST).
+-   */
+-  constructor(initial: SkinBackgroundConfig | null, persist: (next: SkinBackgroundConfig) => void) {
++   * @param recommended - the active skin's recommended values from its
++   *   `tuning.json`, consulted per field. Precedence is
++   *   default < recommendation < stored user value, so a skin's advice applies
++   *   only where the user has not spoken and clearing the stored config returns
++   *   to the advice. Deliberately a reader, never a writer: `init()` publishes
++   *   but does not persist, so merely switching skins cannot bake a
++   *   recommendation into the stored config. A genuine user edit does persist
++   *   the full snapshot, advice included — that is the user's own action, and
++   *   after it their value wins everywhere it speaks.
++   */
++  constructor(
++    initial: SkinBackgroundConfig | null,
++    persist: (next: SkinBackgroundConfig) => void,
++    private readonly recommended: () => SkinBackgroundConfig | null | undefined = () => null,
++  ) {
+     this.persist = persist
+-    if (initial !== null) this.assign(initial)
++    // Assign unconditionally, including the null case: `{...recommendation}` with
++    // no stored config is exactly the defaults when the skin advises nothing, so
++    // this changes no existing behaviour, but it means a skin WITH advice is in
++    // effect from construction instead of flashing default blur until init()
++    // arrives.
++    this.assign(initial ?? {})
+     this.applyOcclusion()
+     this.applyInputCardBlur()
+     this.applyBubbleOpacity()
+@@ -283,6 +302,8 @@
        this.rafId = null
      }
      this.removeBlurElement()
@@ -74,7 +106,27 @@
      document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
      document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
      document.body.style.removeProperty(BUBBLE_BLUR_VAR)
-@@ -336,13 +339,17 @@
+@@ -292,9 +313,17 @@
+     }
+   }
+ 
+-  /** Copy one config into the live fields, defaults filling the gaps. */
++  /**
++   * Copy one config into the live fields.
++   *
++   * Merge order is the whole feature: the skin's recommendation fills the gaps
++   * the stored config leaves, and the stored config wins wherever it speaks.
++   * Per field, not all-or-nothing, so setting one control by hand does not
++   * discard the rest of the skin's advice.
++   */
+   private assign(config: SkinBackgroundConfig): void {
+-    const resolved = resolveSkinBackground(config)
++    const recommended = this.recommended() ?? {}
++    const resolved = resolveSkinBackground({ ...recommended, ...config })
+     this.enabledValue = resolved.enabled
+     this.opacityValue = resolved.backgroundOpacity
+     this.blurEmptyValue = resolved.backgroundBlurEmpty
+@@ -336,13 +365,17 @@
      document.body.style.setProperty(BUBBLE_BLUR_VAR, this.bubbleBlurValue + 'px')
    }
  
@@ -95,7 +147,7 @@
    }
  
    /**
-@@ -352,6 +359,10 @@
+@@ -352,6 +385,10 @@
     */
    private syncBlur(): void {
      if (this.disposed) return
@@ -106,7 +158,7 @@
      if (this.hasWallpaper()) {
        // The wallpaper module owns its own blur (wallpaperBlur); the skin-center
        // background blur layer must stay off while a wallpaper is mounted so
-@@ -369,9 +380,14 @@
+@@ -369,9 +406,14 @@
      else this.removeBlurElement()
    }
  
@@ -123,7 +175,7 @@
    }
  
    /** True while a Wallpaper Engine wallpaper is mounted. */
-@@ -388,6 +404,7 @@
+@@ -388,6 +430,7 @@
        element.style.zIndex = '-1'
        element.style.pointerEvents = 'none'
        element.setAttribute('aria-hidden', 'true')
@@ -131,7 +183,7 @@
        this.blurElement = element
        document.body.appendChild(element)
        this.appliedBlur = null
-@@ -400,6 +417,52 @@
+@@ -400,6 +443,52 @@
      this.blurElement.style.setProperty('-webkit-backdrop-filter', blur)
    }
  

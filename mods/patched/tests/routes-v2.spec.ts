@@ -172,6 +172,63 @@ describe('v2 catalog installed-only filter', () => {
   })
 })
 
+describe('v2 diagnostics route', () => {
+  it('serves the catalog diagnostics, per-skin warnings and the last transform failure', async () => {
+    writeFixtureSkin('harbor')
+    writeFixtureSkin('evil', { css: '.a { background: url(https://evil.example/x.png); }\n' })
+    writeFixtureSkin('broken', { css: 'x' })
+    writeFileSync(join(builtin, 'broken', 'skin.json'), '{bad')
+    const server = await serve(makeRoutes())
+    // A failure is only recorded once the serve path has actually failed, and
+    // the serve response itself is unchanged by the record.
+    const denied = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/evil/stylesheet`)
+    expect(denied.status).toBe(422)
+    expect(denied.jsonBody.error).toBe('css-whitelist-violation')
+
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
+    expect(res.status).toBe(200)
+    expect(res.jsonBody.ok).toBe(true)
+    expect(typeof res.jsonBody.capturedAt).toBe('number')
+    expect(res.jsonBody.diagnostics.map((d: { subject: string }) => d.subject)).toEqual(['broken'])
+    expect(res.jsonBody.skins.map((s: { id: string }) => s.id)).toEqual(['evil', 'harbor'])
+    expect(res.jsonBody.transformFailures).toHaveLength(1)
+    expect(res.jsonBody.transformFailures[0].skinId).toBe('evil')
+    expect(res.jsonBody.transformFailures[0].filename).toBe('skin.css')
+    expect(res.jsonBody.transformFailures[0].violations.length).toBeGreaterThan(0)
+    await server.close()
+  })
+
+  it('keeps one failure record per served file instead of growing with requests', async () => {
+    writeFixtureSkin('evil', { css: '.a { background: url(https://evil.example/x.png); }\n' })
+    const server = await serve(makeRoutes())
+    const path = `${SKIN_CENTER_V2_PREFIX}/skins/evil/stylesheet`
+    expect((await call(server.port, 'GET', path)).status).toBe(422)
+    expect((await call(server.port, 'GET', path)).status).toBe(422)
+    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
+    expect(res.jsonBody.transformFailures).toHaveLength(1)
+    await server.close()
+  })
+
+  it('is empty on a healthy install and fences cross-site reads', async () => {
+    const server = await serve(makeRoutes())
+    const clean = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
+    expect(clean.status).toBe(200)
+    expect(clean.jsonBody.diagnostics).toEqual([])
+    expect(clean.jsonBody.skins).toEqual([])
+    expect(clean.jsonBody.transformFailures).toEqual([])
+
+    const fenced = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`, {
+      headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
+    })
+    expect(fenced.status).toBe(403)
+    expect(fenced.jsonBody.error).toBe('cross-site-request-rejected')
+
+    const wrongMethod = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
+    expect(wrongMethod.status).toBe(405)
+    await server.close()
+  })
+})
+
 describe('v2 stylesheet / patches / hooks routes', () => {
   it('serves the transformed, scoped stylesheet', async () => {
     writeFixtureSkin('harbor')

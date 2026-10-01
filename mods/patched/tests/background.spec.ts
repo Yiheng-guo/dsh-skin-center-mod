@@ -7,6 +7,7 @@
  * client wiring uses.
  */
 import { beforeEach, describe, expect, it } from 'vitest'
+import { SKIN_BACKGROUND_DEFAULTS } from '../src/core/background.ts'
 import type { SkinBackgroundConfig } from '../src/core/background.ts'
 import {
   BackgroundController,
@@ -347,6 +348,54 @@ describe('BackgroundController', () => {
       bubbleOpacity: 50,
       bubbleBlur: 10,
     })
+    controller.dispose()
+  })
+})
+
+describe('BackgroundController skin recommendation', () => {
+  // Precedence is the whole feature: default < skin recommendation < stored user
+  // value, merged per field. A skin ships advice in its tuning.json sidecar; it
+  // must apply only where the user has not spoken, and must never need its own
+  // state flag to know whether it has been applied.
+
+  it('fills the gaps with the active skin recommendation, per field', () => {
+    const recommended = { backgroundOpacity: 45, backgroundBlurContent: 12, inputCardBlur: 4 }
+    const controller = new BackgroundController(null, () => {}, () => recommended)
+    expect(controller.opacity()).toBe(45)
+    expect(controller.blurContent()).toBe(12)
+    expect(controller.inputCardBlur()).toBe(4)
+    // A field the skin says nothing about still comes from the defaults.
+    expect(controller.bubbleBlur()).toBe(SKIN_BACKGROUND_DEFAULTS.bubbleBlur)
+    controller.dispose()
+  })
+
+  it('lets one stored field win without discarding the rest of the advice', () => {
+    const controller = new BackgroundController(null, () => {}, () => ({
+      backgroundOpacity: 45,
+      backgroundBlurContent: 12,
+      inputCardBlur: 4,
+    }))
+    controller.init({ inputCardBlur: 0 })
+    expect(controller.inputCardBlur()).toBe(0)
+    expect(controller.opacity()).toBe(45)
+    expect(controller.blurContent()).toBe(12)
+    controller.dispose()
+  })
+
+  it('returns to the recommendation when the stored config is cleared', () => {
+    const controller = new BackgroundController(null, () => {}, () => ({ inputCardBlur: 4 }))
+    controller.init({ inputCardBlur: 18 })
+    expect(controller.inputCardBlur()).toBe(18)
+    // What `dsh-skin bg reset` produces: no stored fields at all.
+    controller.init({})
+    expect(controller.inputCardBlur()).toBe(4)
+    controller.dispose()
+  })
+
+  it('falls back to the documented defaults for a skin with no recommendation', () => {
+    const controller = new BackgroundController(null, () => {}, () => null)
+    expect(controller.inputCardBlur()).toBe(SKIN_BACKGROUND_DEFAULTS.inputCardBlur)
+    expect(controller.opacity()).toBe(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity)
     controller.dispose()
   })
 })

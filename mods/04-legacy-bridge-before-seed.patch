@@ -1,9 +1,28 @@
---- baseline/src/index.ts	2026-10-01 03:37:31
-+++ patched/src/index.ts	2026-10-01 03:37:31
-@@ -354,24 +354,18 @@
-     console.error('[ui-skin-center] route registration failed:', error)
-   }
+--- baseline/src/index.ts	2026-10-01 12:41:45
++++ patched/src/index.ts	2026-10-01 12:41:45
+@@ -42,7 +42,15 @@
+ export type { TokenAuditStylesheet, TokenAuditResult } from './core/css-safety/token-audit.ts'
+ export { loadSkinCatalog, findSkin, resolveInsideSkin, userSkinsDir, builtinSkinsDir, canServeSkinHooks } from './skin-repo.ts'
+ export type { SkinCatalog, SkinCatalogEntry } from './skin-repo.ts'
+-export { defaultActiveStatePath, readActiveSelection, writeActiveSelection } from './active-state.ts'
++export { defaultActiveStatePath, readActiveSelection, writeActiveSelection, readActiveState, writeActiveState } from './active-state.ts'
++export type { ActiveStateFile, ActiveStateUpdate } from './active-state.ts'
++// The background half of the same document: the dsh-skin CLI's `bg` group
++// reads and merge-writes it through these, never through its own parser.
++export {
++  SKIN_BACKGROUND_DEFAULTS,
++  normalizeSkinBackground,
++  resolveSkinBackground,
++} from './core/background.ts'
  
+ /** Stable cordis plugin name (matches cordis.patch.yml insert id). */
+ export const name = 'ui-skin-center'
+@@ -352,19 +360,6 @@
+     }, 'ui-skin-center: routes')
+   } catch (error) {
+     console.error('[ui-skin-center] route registration failed:', error)
+-  }
+-
 -  // Default-skin seed (market on-demand plan): only blue-fantasy ships in
 -  // the package; every other skin is a market install into the user skins
 -  // directory. A first boot with no persisted selection activates the shipped
@@ -15,10 +34,10 @@
 -    seedDefaultActiveSkin(statePath, (id) => findSkin(loadSkinCatalog(), id) !== null)
 -  } catch (error) {
 -    console.error('[ui-skin-center] default-skin seed failed:', error)
--  }
--
+   }
+ 
    // One-shot legacy bridge (issue #506): migrate the retired dsh-skin
-   // managed-section selection into the v2 store and strip the legacy rows.
+@@ -372,6 +367,13 @@
    // Idempotent and fail-closed. Notes go to the host log only when the
    // bridge migrated, cleaned, or failed — the nothing-to-migrate steady
    // state stays silent instead of logging on every boot (issue #788).
@@ -32,7 +51,7 @@
    try {
      const statePath = defaultActiveStatePath()
      const knownIds = loadSkinCatalog().skins.map((s) => s.manifest.id)
-@@ -384,4 +378,18 @@
+@@ -384,4 +386,18 @@
    } catch (error) {
      console.error('[ui-skin-center] legacy bridge failed:', error)
    }

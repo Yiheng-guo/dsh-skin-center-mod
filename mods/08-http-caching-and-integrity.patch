@@ -1,14 +1,17 @@
---- baseline/src/routes-v2.ts	2026-10-01 03:37:31
-+++ patched/src/routes-v2.ts	2026-10-01 03:37:31
-@@ -12,6 +12,7 @@
+--- baseline/src/routes-v2.ts	2026-10-01 12:41:45
++++ patched/src/routes-v2.ts	2026-10-01 12:41:45
+@@ -12,6 +12,10 @@
   *  - GET  /skins/<id>/assets/<path>    static in-directory assets (incl. preview/)
   *  - GET  /active                      the persisted active skin id + background preferences
   *  - POST /active                      persist active id and/or background (same-origin fenced)
 + *  - POST /verify                      integrity report; repairs only on {"autoRepair":true}
++ *  - GET  /diagnostics                 read-only observability snapshot: catalog
++ *                                      diagnostics + per-skin warnings + the last
++ *                                      CSS transform failure per served file
   *
   * The stylesheet/patches responses pass through the CSS safety pipeline
   * (force-scoped under html[data-dsh-skin="<id>"], whitelist fail-closed), so
-@@ -22,9 +23,11 @@
+@@ -22,9 +26,11 @@
   * @module @linxin666/dsh-client-ui-skin-center/routes-v2
   */
  
@@ -21,7 +24,7 @@
  
  import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
  
-@@ -72,8 +75,37 @@
+@@ -72,8 +78,64 @@
    fetchImpl?: typeof fetch
    /** Local source dir mirror override (tests). */
    localSourceDir?: string
@@ -56,10 +59,37 @@
 +  identity: FileIdentity,
 +) => string
 +
++/**
++ * Diagnostics record of the last CSS transform failure per served file.
++ *
++ * This is an observation, never a second source of truth: the serve path keeps
++ * producing exactly the same 422/500 envelope and the same body it produced
++ * before this record existed, because the caught error is rethrown untouched.
++ */
++interface TransformFailure {
++  skinId: string
++  filename: string
++  at: number
++  /** Truncated failure message (diagnostic string, not a response body). */
++  error: string
++  /** Whitelist violations, truncated; empty for non-whitelist failures. */
++  violations: readonly string[]
++}
++
++/**
++ * Bounds on the retained failures. Keys are one per (skin, served file), so
++ * the ceiling is the installed stylesheet count; insertion order is recency,
++ * so eviction drops the least recently failed file. The per-entry caps keep a
++ * pathological selector from turning one record into a log sink.
++ */
++const TRANSFORM_FAILURE_MAX = 16
++const TRANSFORM_ERROR_CHARS = 400
++const TRANSFORM_VIOLATIONS_MAX = 8
++
  function sendCss(res: ServerResponse, status: number, code: string): void {
    res.writeHead(status, { 'content-type': 'text/css; charset=utf-8', 'cache-control': 'no-store' })
    res.end(code)
-@@ -85,6 +117,7 @@
+@@ -85,6 +147,7 @@
    entry: SkinCatalogEntry,
    relPath: string,
    filename: string,
@@ -67,7 +97,7 @@
  ): void {
    const abs = resolveInsideSkin(entry, relPath)
    if (!abs || !existsSync(abs)) {
-@@ -92,16 +125,8 @@
+@@ -92,16 +155,8 @@
      return
    }
    try {
@@ -86,7 +116,7 @@
      sendCss(res, 200, code)
    } catch (error) {
      if (error instanceof SkinCssSafetyError) {
-@@ -112,16 +137,159 @@
+@@ -112,16 +167,159 @@
    }
  }
  
@@ -251,12 +281,12 @@
  }
  
  /**
-@@ -134,7 +302,46 @@
+@@ -134,7 +332,110 @@
    // Installed-only catalog (market/store separation): user dirs are always
    // installed, builtins only when the package ships them (files whitelist).
    const shippedSet = (deps.shippedSkinIds ?? shippedSkinIds)()
 +  const transformCss = deps.transformCss ?? transformSkinCss
- 
++
 +  /**
 +   * Transformed-CSS memo: (skin id, filename, mtimeMs, size) -> code. The
 +   * transform is a pure function of those four values (filename selects
@@ -269,6 +299,34 @@
 +   * violation is re-derived and re-reported, never cached as success.
 +   */
 +  const cssCache = new Map<string, string>()
++
++  /**
++   * Last transform failure per (skin id, filename), newest write wins. The
++   * memo must never store a failure (a stale success is worse than a re-run),
++   * so the failing files are exactly the ones this map exists to name; a
++   * bounded map is what keeps that record from growing with request count.
++   */
++  const transformFailures = new Map<string, TransformFailure>()
++
++  const recordTransformFailure = (skinId: string, filename: string, error: unknown): void => {
++    const key = `${skinId}\u0000${filename}`
++    const message = error instanceof Error ? error.message : String(error)
++    const violations = error instanceof SkinCssSafetyError ? error.violations : []
++    // Delete-then-set so the first key stays the least recently failed file.
++    transformFailures.delete(key)
++    transformFailures.set(key, {
++      skinId,
++      filename,
++      at: Date.now(),
++      error: message.length > TRANSFORM_ERROR_CHARS ? message.slice(0, TRANSFORM_ERROR_CHARS) : message,
++      violations: violations.slice(0, TRANSFORM_VIOLATIONS_MAX),
++    })
++    if (transformFailures.size > TRANSFORM_FAILURE_MAX) {
++      const oldest = transformFailures.keys().next().value
++      if (oldest !== undefined) transformFailures.delete(oldest)
++    }
++  }
+ 
 +  const memoTransform: SkinCssMemo = (entry, abs, filename, identity) => {
 +    const key = `${entry.manifest.id}\u0000${filename}\u0000${identity.mtimeMs}\u0000${identity.size}`
 +    const hit = cssCache.get(key)
@@ -277,16 +335,24 @@
 +      cssCache.set(key, hit)
 +      return hit
 +    }
-+    // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
-+    // headers reject non-Latin1 bytes and skin warnings can embed selector
-+    // fragments with CJK text.
-+    const { code } = transformCss(readFileSync(abs, 'utf8'), {
-+      skinId: entry.manifest.id,
-+      filename,
-+      // Only the main stylesheet derives fallback tints; patches re-deriving
-+      // from their partial token view would override the skin's real values.
-+      deriveFallbacks: filename === 'skin.css',
-+    })
++    let code: string
++    try {
++      // Warnings are diagnostic surface (catalog/CLI), not transport: HTTP
++      // headers reject non-Latin1 bytes and skin warnings can embed selector
++      // fragments with CJK text.
++      code = transformCss(readFileSync(abs, 'utf8'), {
++        skinId: entry.manifest.id,
++        filename,
++        // Only the main stylesheet derives fallback tints; patches re-deriving
++        // from their partial token view would override the skin's real values.
++        deriveFallbacks: filename === 'skin.css',
++      }).code
++    } catch (error) {
++      // Diagnostics ride the failure, not the response: the same error is
++      // rethrown, so the serve path answers byte-identically to before.
++      recordTransformFailure(entry.manifest.id, filename, error)
++      throw error
++    }
 +    cssCache.set(key, code)
 +    if (cssCache.size > CSS_TRANSFORM_CACHE_MAX) {
 +      const oldest = cssCache.keys().next().value
@@ -295,10 +361,38 @@
 +    return code
 +  }
 +
++  /**
++   * Read-only observability snapshot (the skin system's own failure state).
++   *
++   * The adapter's per-rule counters and the effect ledger's cleanup failures
++   * live in the browser, so this route carries the host half: the catalog's
++   * diagnostics and per-skin warnings exactly as /catalog already computes
++   * them, plus the last CSS transform failure per served file. It reads and
++   * writes nothing and never changes another route's answer; it is fenced like
++   * the writes so a foreign page cannot fingerprint the local install.
++   */
++  const diagnosticsHandler: WebRoute['handler'] = (req, res) => {
++    if (!requireSameOrigin(req, res)) return
++    if (req.method !== 'GET') {
++      writeJson(res, 405, { ok: false, error: 'method-not-allowed' })
++      return
++    }
++    const catalog = loadCatalog()
++    writeJson(res, 200, {
++      ok: true,
++      capturedAt: catalog.capturedAt,
++      diagnostics: catalog.diagnostics,
++      skins: catalog.skins
++        .filter((s) => s.origin === 'user' || shippedSet.has(s.manifest.id))
++        .map((s) => ({ id: s.manifest.id, origin: s.origin, warnings: s.warnings })),
++      transformFailures: [...transformFailures.values()],
++    })
++  }
++
    const catalogHandler: WebRoute['handler'] = (_req, res) => {
      const catalog = loadCatalog()
      writeJson(res, 200, {
-@@ -169,7 +376,10 @@
+@@ -169,7 +470,10 @@
      } catch {
        body = null
      }
@@ -310,7 +404,7 @@
      const result = await verifyAndRepairAllSkins(loadCatalog, {
        userDir: deps.userDir,
        fetchImpl: deps.fetchImpl,
-@@ -248,7 +458,7 @@
+@@ -248,7 +552,7 @@
        return
      }
      if (sub === 'stylesheet') {
@@ -319,7 +413,7 @@
        return
      }
      if (sub === 'patches') {
-@@ -257,7 +467,7 @@
+@@ -257,7 +561,7 @@
          writeJson(res, 404, { ok: false, error: 'no-patches' })
          return
        }
@@ -328,7 +422,7 @@
        return
      }
      if (sub === 'hooks.mjs') {
-@@ -285,7 +495,7 @@
+@@ -285,7 +589,7 @@
        return
      }
      if (sub.startsWith('assets/') || sub.startsWith('preview/')) {
@@ -337,14 +431,69 @@
        return
      }
      writeJson(res, 404, { ok: false, error: 'unknown-skin-resource' })
---- baseline/src/skin-repo.ts	2026-10-01 03:37:32
-+++ patched/src/skin-repo.ts	2026-10-01 03:37:32
-@@ -168,6 +168,32 @@
- export function canServeSkinHooks(entry: SkinCatalogEntry): boolean {
-   if (entry.manifest.facets?.client === undefined) return false
-   return entry.origin === 'builtin' || marketHooksTrust(entry.manifest, entry.dir).trusted
+@@ -349,6 +653,7 @@
+ 
+   return [
+     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/catalog`, handler: catalogHandler },
++    { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/diagnostics`, handler: diagnosticsHandler },
+     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/verify`, handler: verifyHandler },
+     { kind: 'prefix', path: skinPrefix.replace(/\/$/, ''), handler: skinsHandler },
+     { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/active`, handler: (req, res) => {
+--- baseline/src/skin-repo.ts	2026-10-01 12:41:45
++++ patched/src/skin-repo.ts	2026-10-01 12:41:45
+@@ -33,6 +33,8 @@
+ import { validateSkinManifestV2 } from './core/manifest-v2/validate.ts'
+ import type { SkinManifestV2 } from './core/manifest-v2/types.ts'
+ import { auditTokenContract, type TokenAuditStylesheet } from './core/css-safety/token-audit.ts'
++import { parseSkinTuning, TUNING_FILENAME } from './core/tuning.ts'
++import type { SkinTuning, SkinTuningParse } from './core/tuning.ts'
+ import { resolveHarnessHome } from './harness-home.ts'
+ import {
+   repairSkinFromMarket,
+@@ -46,6 +48,25 @@
+ 
+ export type SkinOrigin = 'builtin' | 'user'
+ 
++/**
++ * Read a skin's optional `tuning.json`.
++ *
++ * Absent file yields null (the common case, and it must stay free). A file that
++ * is present but unusable yields a parse carrying problems and a null tuning, so
++ * the caller reports it on the catalog and the skin behaves exactly as it would
++ * without the file.
++ */
++function readSkinTuning(dir: string): SkinTuningParse | null {
++  const file = join(dir, TUNING_FILENAME)
++  if (!existsSync(file)) return null
++  try {
++    return parseSkinTuning(JSON.parse(readFileSync(file, 'utf8')))
++  } catch (error) {
++    const reason = error instanceof Error ? error.message : String(error)
++    return { tuning: null, problems: [`${TUNING_FILENAME} is not valid JSON: ${reason}`] }
++  }
 +}
 +
+ export interface SkinCatalogEntry {
+   /** Validated v2 manifest (immutable; do not mutate). */
+   manifest: SkinManifestV2
+@@ -55,6 +76,13 @@
+   /** Non-fatal notes (deprecated v1 fields ignored, shadowing, etc). */
+   warnings: string[]
+   /**
++   * The skin's own `tuning.json`, when it ships one and it parses. Consumed
++   * two ways: recommended background values (used only while the user has not
++   * configured the background controls) and scoped token overrides. See
++   * `src/core/tuning.ts` for why this is a sidecar rather than a manifest field.
++   */
++  tuning?: SkinTuning
++  /**
+    * True when a user-directory skin's declared hooks identity matched
+    * official-market provenance or the generated reviewed legacy identity at
+    * snapshot time. The HTTP serving gate re-verifies current bytes. Built-in
+@@ -170,6 +198,32 @@
+   return entry.origin === 'builtin' || marketHooksTrust(entry.manifest, entry.dir).trusted
+ }
+ 
 +/**
 + * Manifest file references the asset route cannot serve. The stylesheet,
 + * patches and hooks entry each have a dedicated route branch, so only the
@@ -369,10 +518,12 @@
 +    check('preview.dark', manifest.preview.dark)
 +  }
 +  return warnings
- }
- 
++}
++
  function collectSource(spec: SourceSpec, catalog: SkinCatalog, claimed: Map<string, SkinCatalogEntry>): void {
-@@ -211,7 +237,7 @@
+   if (!existsSync(spec.root)) return
+   let dirNames: string[]
+@@ -211,7 +265,7 @@
        if (spec.origin === 'user' && existing.origin === 'builtin') {
          // User shadows builtin: replace and note it on the winning entry.
          catalog.skins = catalog.skins.filter((s) => s !== existing)
@@ -381,7 +532,7 @@
          const trust = marketHooksTrust(manifest, dir)
          if (trust.warning !== null) winnerWarnings.push(trust.warning)
          const winner: SkinCatalogEntry = {
-@@ -228,7 +254,7 @@
+@@ -228,7 +282,7 @@
        }
        continue
      }
@@ -390,8 +541,32 @@
      const trust = spec.origin === 'user'
        ? marketHooksTrust(manifest, dir)
        : { trusted: false, warning: null }
---- baseline/tests/routes-v2.spec.ts	2026-10-01 03:37:32
-+++ patched/tests/routes-v2.spec.ts	2026-10-01 03:37:32
+@@ -237,7 +291,22 @@
+     // sets); surface it on the catalog so third-party skins show their gaps.
+     const contractWarnings = auditTokenContract(stylesheetEntries(manifest, dir))
+     warnings.push(...contractWarnings.warnings)
+-    const entry: SkinCatalogEntry = { manifest, origin: spec.origin, dir, warnings, ...(trust.trusted ? { hooksTrusted: true } : {}) }
++    // Optional per-skin tuning sidecar: the skin's own recommended background
++    // values plus scoped token overrides. Deliberately a sidecar rather than a
++    // skin.json field, because the v2 schema is additionalProperties:false and a
++    // new field would make the skin unreadable to every existing reader. A
++    // malformed sidecar is reported and otherwise ignored, so it can never stop
++    // a skin from installing.
++    const tuning = readSkinTuning(dir)
++    if (tuning !== null) warnings.push(...tuning.problems)
++    const entry: SkinCatalogEntry = {
++      manifest,
++      origin: spec.origin,
++      dir,
++      warnings,
++      ...(tuning?.tuning != null ? { tuning: tuning.tuning } : {}),
++      ...(trust.trusted ? { hooksTrusted: true } : {}),
++    }
+     claimed.set(manifest.id, entry)
+     catalog.skins.push(entry)
+   }
+--- baseline/tests/routes-v2.spec.ts	2026-10-01 12:41:45
++++ patched/tests/routes-v2.spec.ts	2026-10-01 12:41:45
 @@ -17,6 +17,7 @@
  
  import { makeSkinCenterV2Routes, SKIN_CENTER_V2_PREFIX } from '../src/routes-v2.ts'
@@ -400,7 +575,71 @@
  
  let root: string
  let builtin: string
-@@ -216,6 +217,61 @@
+@@ -171,6 +172,63 @@
+   })
+ })
+ 
++describe('v2 diagnostics route', () => {
++  it('serves the catalog diagnostics, per-skin warnings and the last transform failure', async () => {
++    writeFixtureSkin('harbor')
++    writeFixtureSkin('evil', { css: '.a { background: url(https://evil.example/x.png); }\n' })
++    writeFixtureSkin('broken', { css: 'x' })
++    writeFileSync(join(builtin, 'broken', 'skin.json'), '{bad')
++    const server = await serve(makeRoutes())
++    // A failure is only recorded once the serve path has actually failed, and
++    // the serve response itself is unchanged by the record.
++    const denied = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/evil/stylesheet`)
++    expect(denied.status).toBe(422)
++    expect(denied.jsonBody.error).toBe('css-whitelist-violation')
++
++    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
++    expect(res.status).toBe(200)
++    expect(res.jsonBody.ok).toBe(true)
++    expect(typeof res.jsonBody.capturedAt).toBe('number')
++    expect(res.jsonBody.diagnostics.map((d: { subject: string }) => d.subject)).toEqual(['broken'])
++    expect(res.jsonBody.skins.map((s: { id: string }) => s.id)).toEqual(['evil', 'harbor'])
++    expect(res.jsonBody.transformFailures).toHaveLength(1)
++    expect(res.jsonBody.transformFailures[0].skinId).toBe('evil')
++    expect(res.jsonBody.transformFailures[0].filename).toBe('skin.css')
++    expect(res.jsonBody.transformFailures[0].violations.length).toBeGreaterThan(0)
++    await server.close()
++  })
++
++  it('keeps one failure record per served file instead of growing with requests', async () => {
++    writeFixtureSkin('evil', { css: '.a { background: url(https://evil.example/x.png); }\n' })
++    const server = await serve(makeRoutes())
++    const path = `${SKIN_CENTER_V2_PREFIX}/skins/evil/stylesheet`
++    expect((await call(server.port, 'GET', path)).status).toBe(422)
++    expect((await call(server.port, 'GET', path)).status).toBe(422)
++    const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
++    expect(res.jsonBody.transformFailures).toHaveLength(1)
++    await server.close()
++  })
++
++  it('is empty on a healthy install and fences cross-site reads', async () => {
++    const server = await serve(makeRoutes())
++    const clean = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
++    expect(clean.status).toBe(200)
++    expect(clean.jsonBody.diagnostics).toEqual([])
++    expect(clean.jsonBody.skins).toEqual([])
++    expect(clean.jsonBody.transformFailures).toEqual([])
++
++    const fenced = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/diagnostics`, {
++      headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' },
++    })
++    expect(fenced.status).toBe(403)
++    expect(fenced.jsonBody.error).toBe('cross-site-request-rejected')
++
++    const wrongMethod = await call(server.port, 'POST', `${SKIN_CENTER_V2_PREFIX}/diagnostics`)
++    expect(wrongMethod.status).toBe(405)
++    await server.close()
++  })
++})
++
+ describe('v2 stylesheet / patches / hooks routes', () => {
+   it('serves the transformed, scoped stylesheet', async () => {
+     writeFixtureSkin('harbor')
+@@ -216,6 +274,61 @@
      expect(res.jsonBody.error).toBe('css-whitelist-violation')
      await server.close()
    })
@@ -462,13 +701,10 @@
  })
  
  describe('v2 hooks trust gate', () => {
-@@ -355,6 +411,66 @@
-     const res = await call(server.port, 'GET', `${SKIN_CENTER_V2_PREFIX}/skins/harbor/assets/bg.png`)
-     expect(res.status).toBe(200)
-     expect(res.headers['content-type']).toBe('image/png')
-+    await server.close()
-+  })
-+
+@@ -358,6 +471,66 @@
+     await server.close()
+   })
+ 
 +  it('revalidates an unchanged asset to 304 via ETag and Last-Modified', async () => {
 +    writeFixtureSkin('harbor')
 +    const server = await serve(makeRoutes())
@@ -526,10 +762,13 @@
 +    expect(unsatisfiable.status).toBe(416)
 +    expect(unsatisfiable.headers['content-range']).toBe('bytes */10')
 +    expect(unsatisfiable.text).toBe('')
-     await server.close()
-   })
- 
-@@ -691,6 +807,60 @@
++    await server.close()
++  })
++
+   it('refuses path escapes', async () => {
+     writeFixtureSkin('harbor')
+     const server = await serve(makeRoutes())
+@@ -691,6 +864,60 @@
      expect(res.jsonBody.valid).toBe(1)
  
      // Check disk content
@@ -590,8 +829,8 @@
      expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #fff; }')
      await server.close()
    })
---- baseline/tests/skin-repo.spec.ts	2026-10-01 03:37:32
-+++ patched/tests/skin-repo.spec.ts	2026-10-01 03:37:32
+--- baseline/tests/skin-repo.spec.ts	2026-10-01 12:41:45
++++ patched/tests/skin-repo.spec.ts	2026-10-01 12:41:45
 @@ -112,6 +112,28 @@
      const catalog = loadSkinCatalog({ builtinDir: builtin, userDir: user })
      expect(catalog.skins).toHaveLength(1)

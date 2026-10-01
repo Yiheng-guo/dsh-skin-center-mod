@@ -1,6 +1,28 @@
---- baseline/src/client/runtime/skin-controller.ts	2026-10-01 03:37:31
-+++ patched/src/client/runtime/skin-controller.ts	2026-10-01 03:37:31
-@@ -65,8 +65,13 @@
+--- baseline/src/client/runtime/skin-controller.ts	2026-10-01 12:41:45
++++ patched/src/client/runtime/skin-controller.ts	2026-10-01 12:41:45
+@@ -27,6 +27,8 @@
+ import { buildBackgroundMedia, clearLayer, ensureDecorationLayers } from './decoration-layers.ts'
+ import type { DecorationLayers } from './decoration-layers.ts'
+ import { setSceneBackdropActive } from './backdrop-scene.ts'
++import { tuningTokenCss } from '../../core/tuning.ts'
++import type { SkinTuning } from '../../core/tuning.ts'
+ 
+ /** Catalog entry shape the controller needs (mirrors the v2 catalog route). */
+ export interface ControllerSkinEntry {
+@@ -42,6 +44,12 @@
+     }
+     facets?: { client?: { entry: string; apiVersion: string } }
+   }
++  /**
++   * The skin's own `tuning.json`, when it ships one. Only the token overrides
++   * are consumed here; the recommended background values are resolved where the
++   * background controls are, so that user values keep winning.
++   */
++  tuning?: SkinTuning
+ }
+ 
+ export interface SkinControllerDeps {
+@@ -65,8 +73,13 @@
     * Stylesheet loader seam. Default installs a <link rel="stylesheet"> and
     * awaits its load (relative url() inside the served CSS resolves against
     * the route URL — inlining into <style> would break asset resolution).
@@ -15,7 +37,7 @@
    /** hooks.mjs dynamic import seam for tests. */
    importHooks?: (url: string) => Promise<unknown>
    /**
-@@ -164,12 +169,12 @@
+@@ -164,12 +177,12 @@
      setBackgroundLayer(currentActivation, buildBackgroundMedia(doc, variant, assetBase))
    }
    const unsubscribeTheme = themeSubscribe(() => repaintBackgroundForTheme())
@@ -30,7 +52,7 @@
      link.onerror = () => { clearTimeout(timer); rejectLink(new Error(`stylesheet load failed: ${href}`)) }
      doc.head.appendChild(link)
    }))
-@@ -201,10 +206,19 @@
+@@ -201,10 +214,19 @@
     * loadStylesheet; here we only register the teardown). Links keep relative
     * url() resolution intact — a <style> tag would resolve them against the
     * document and 404 every skin asset.
@@ -53,7 +75,7 @@
    }
  
    /**
-@@ -348,11 +362,11 @@
+@@ -348,11 +370,24 @@
          const patchesHref = entry.manifest.contributes.patches !== undefined
            ? `${apiBase}/skins/${id}/patches`
            : null
@@ -66,11 +88,24 @@
 -          trackStylesheet(activation, 'patches', patchesHref)
 +          const patchesLink = await loadStylesheet(patchesHref).catch(() => undefined)
 +          trackStylesheet(activation, 'patches', patchesHref, patchesLink)
++        }
++        // Scoped token overrides from the skin's tuning.json. A <style> is the
++        // right element here, unlike the stylesheet links above: the rule has no
++        // url() to resolve, so it does not depend on being fetched from the
++        // route URL. It is appended after the links, so an equal-specificity
++        // declaration wins on document order without needing !important.
++        const tuningCss = tuningTokenCss(id, entry.tuning ?? null)
++        if (tuningCss !== null) {
++          const tuningStyle = doc.createElement('style')
++          tuningStyle.setAttribute('data-dsh-skin-tuning', id)
++          tuningStyle.textContent = tuningCss
++          doc.head.appendChild(tuningStyle)
++          ledger.record(activation, 'style:tuning', () => tuningStyle.remove())
          }
          if (seq !== latestRequest) throw new StaleSwitch()
          installBackground(activation, entry)
---- baseline/tests/skin-runtime.spec.ts	2026-10-01 03:37:32
-+++ patched/tests/skin-runtime.spec.ts	2026-10-01 03:37:32
+--- baseline/tests/skin-runtime.spec.ts	2026-10-01 12:41:45
++++ patched/tests/skin-runtime.spec.ts	2026-10-01 12:41:45
 @@ -338,11 +338,13 @@
        for (const bad of options.failFetchFor ?? []) {
          if (href.includes(bad)) throw new Error(`load ${href} -> 500`)
@@ -86,12 +121,10 @@
      })
      const errors: string[] = []
      const controller = createSkinController({
-@@ -376,6 +378,36 @@
-     expect(document.documentElement.getAttribute('data-dsh-skin')).toBe('matrix')
-     expect(document.head.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(1)
+@@ -378,6 +380,57 @@
      expect(ledger.entries().some((e) => e.kind === 'release')).toBe(true)
-+  })
-+
+   })
+ 
 +  it('does not leak one stylesheet link per switch when the server pre-rendered one', async () => {
 +    const { controller } = harness()
 +    // Exactly what tap-index-adapter renders before the runtime boots: a link
@@ -120,6 +153,29 @@
 +    }
 +    expect(document.head.querySelectorAll('link[rel="stylesheet"]')).toHaveLength(2)
 +    expect(document.head.querySelector('link[rel="stylesheet"]')).toBe(preRendered)
-   })
- 
++  })
++
++  it('applies a skin tuning token override inside that skin scope and tears it down', async () => {
++    const { controller } = harness()
++    const tuned = { ...entryFor('harbor'), tuning: { tokens: { '--dsw-alias-label-tertiary': '#849ab8' } } }
++    await controller.switchTo('harbor', tuned)
++    const style = document.head.querySelector<HTMLStyleElement>('style[data-dsh-skin-tuning="harbor"]')
++    expect(style?.textContent).toBe('html[data-dsh-skin="harbor"]{--dsw-alias-label-tertiary:#849ab8}')
++    // The override must die with its activation: left behind, it would keep
++    // recolouring a skin whose scope attribute no longer matches this id.
++    await controller.switchTo('matrix', entryFor('matrix'))
++    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
++  })
++
++  it('adds no tuning element for a skin that ships none, or only background advice', async () => {
++    const { controller } = harness()
++    await controller.switchTo('harbor', entryFor('harbor'))
++    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
++    const adviceOnly = { ...entryFor('matrix'), tuning: { background: { inputCardBlur: 12 } } }
++    await controller.switchTo('matrix', adviceOnly)
++    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
++  })
++
    it('switch to stock removes styles and the attribute', async () => {
+     const { controller } = harness()
+     await controller.switchTo('harbor', entryFor('harbor'))

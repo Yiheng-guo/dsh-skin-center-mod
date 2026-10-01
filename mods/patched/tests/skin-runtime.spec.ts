@@ -410,6 +410,27 @@ describe('skin controller', () => {
     expect(document.head.querySelector('link[rel="stylesheet"]')).toBe(preRendered)
   })
 
+  it('applies a skin tuning token override inside that skin scope and tears it down', async () => {
+    const { controller } = harness()
+    const tuned = { ...entryFor('harbor'), tuning: { tokens: { '--dsw-alias-label-tertiary': '#849ab8' } } }
+    await controller.switchTo('harbor', tuned)
+    const style = document.head.querySelector<HTMLStyleElement>('style[data-dsh-skin-tuning="harbor"]')
+    expect(style?.textContent).toBe('html[data-dsh-skin="harbor"]{--dsw-alias-label-tertiary:#849ab8}')
+    // The override must die with its activation: left behind, it would keep
+    // recolouring a skin whose scope attribute no longer matches this id.
+    await controller.switchTo('matrix', entryFor('matrix'))
+    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
+  })
+
+  it('adds no tuning element for a skin that ships none, or only background advice', async () => {
+    const { controller } = harness()
+    await controller.switchTo('harbor', entryFor('harbor'))
+    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
+    const adviceOnly = { ...entryFor('matrix'), tuning: { background: { inputCardBlur: 12 } } }
+    await controller.switchTo('matrix', adviceOnly)
+    expect(document.head.querySelector('style[data-dsh-skin-tuning]')).toBeNull()
+  })
+
   it('switch to stock removes styles and the attribute', async () => {
     const { controller } = harness()
     await controller.switchTo('harbor', entryFor('harbor'))

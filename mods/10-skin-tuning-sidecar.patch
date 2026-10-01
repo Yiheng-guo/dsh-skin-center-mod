@@ -1,0 +1,291 @@
+--- /dev/null	2026-10-01 12:41:45
++++ patched/src/core/tuning.ts	2026-10-01 12:41:45
+@@ -0,0 +1,151 @@
++/**
++ * Per-skin tuning sidecar (fork extension).
++ *
++ * A skin may ship `tuning.json` next to its `skin.json` describing the
++ * background values that suit its own artwork and, optionally, scoped token
++ * overrides. This exists because the v2 manifest schema is
++ * `additionalProperties: false`: a new field inside `skin.json` would be a hard
++ * validation error for every existing reader, so a skin using it would be
++ * REJECTED by any skin-center build that does not know the field. A sidecar
++ * carries the same information while staying invisible to every other reader,
++ * and it keeps the repository's invariant that a skin is pure data.
++ *
++ * Nothing here executes. The values are consumed as data two ways:
++ *
++ *  - `background` seeds the skin center's background controls when the user has
++ *    not configured them (see the resolution note in `src/active-state.ts`);
++ *    user values always win, and `dsh-skin bg reset` returns to these.
++ *  - `tokens` are emitted as one scoped rule,
++ *    `html[data-dsh-skin="<id>"]{--token:value}`, so a local legibility fix
++ *    survives a skin reinstall instead of being a hand edit of `skin.css`.
++ *
++ * Token values are injected into a stylesheet, so they are validated
++ * fail-closed: a value that could terminate the declaration or open a new rule
++ * is dropped, and the drop is reported rather than silently ignored.
++ *
++ * @module @linxin666/dsh-client-ui-skin-center/core/tuning
++ */
++
++import { normalizeSkinBackground } from './background.ts'
++import type { SkinBackgroundConfig } from './background.ts'
++
++/** The sidecar's file name inside a skin directory. */
++export const TUNING_FILENAME = 'tuning.json'
++
++/** Background values a skin recommends, plus scoped token overrides. */
++export interface SkinTuning {
++  background?: SkinBackgroundConfig
++  tokens?: Record<string, string>
++}
++
++export interface SkinTuningParse {
++  /** Null when the sidecar carries nothing usable. */
++  tuning: SkinTuning | null
++  /** Human-readable reasons a value was dropped, for catalog diagnostics. */
++  problems: string[]
++}
++
++/** A custom property name we are willing to define. */
++const TOKEN_NAME = /^--[a-z0-9-]{1,64}$/i
++
++/** Longest value we accept; real values are colours, lengths and font stacks. */
++const TOKEN_VALUE_MAX = 160
++
++/**
++ * Characters and sequences that must never reach the stylesheet.
++ *
++ * `;` ends the declaration and `{}` opens or closes a rule, so any of them lets
++ * a value escape the scope this module is building. Comments can be used to
++ * swallow the closing brace, and `url()`/`@import`/`expression()` reach the
++ * network, the CSS loader, or (historically) script. Backslashes are rejected
++ * because they are the CSS escape hatch.
++ */
++const FORBIDDEN = [';', '{', '}', '<', '>', '\\', '/*', '*/', 'url(', '@', 'expression(']
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function checkTokenValue(value: unknown): { ok: true; value: string } | { ok: false; reason: string } {
++  if (typeof value !== 'string') return { ok: false, reason: 'not a string' }
++  const trimmed = value.trim()
++  if (trimmed === '') return { ok: false, reason: 'empty' }
++  if (trimmed.length > TOKEN_VALUE_MAX) return { ok: false, reason: `longer than ${TOKEN_VALUE_MAX} characters` }
++  const control = /[\u0000-\u001f\u007f]/.exec(trimmed)
++  if (control !== null) return { ok: false, reason: 'contains a control character' }
++  const hit = FORBIDDEN.find((token) => trimmed.includes(token))
++  if (hit !== undefined) return { ok: false, reason: `contains ${JSON.stringify(hit)}` }
++  return { ok: true, value: trimmed }
++}
++
++/**
++ * Parse a `tuning.json` document. Never throws: a malformed sidecar yields a
++ * null tuning plus problems, so a skin with a broken sidecar still installs and
++ * still renders exactly as it would without one.
++ */
++export function parseSkinTuning(raw: unknown): SkinTuningParse {
++  const problems: string[] = []
++  if (!isRecord(raw)) {
++    return { tuning: null, problems: [`${TUNING_FILENAME} must be a JSON object`] }
++  }
++
++  const tuning: SkinTuning = {}
++
++  if (raw.background !== undefined) {
++    const background = normalizeSkinBackground(raw.background)
++    if (Object.keys(background).length === 0) {
++      problems.push(`${TUNING_FILENAME}: "background" has no usable field`)
++    } else {
++      tuning.background = background
++      if (isRecord(raw.background)) {
++        for (const key of Object.keys(raw.background)) {
++          if (!(key in background)) problems.push(`${TUNING_FILENAME}: background.${key} ignored`)
++        }
++      }
++    }
++  }
++
++  if (raw.tokens !== undefined) {
++    if (!isRecord(raw.tokens)) {
++      problems.push(`${TUNING_FILENAME}: "tokens" must be an object`)
++    } else {
++      const tokens: Record<string, string> = {}
++      for (const [name, value] of Object.entries(raw.tokens)) {
++        if (!TOKEN_NAME.test(name)) {
++          problems.push(`${TUNING_FILENAME}: tokens key ${JSON.stringify(name)} is not a custom property name`)
++          continue
++        }
++        const checked = checkTokenValue(value)
++        if (!checked.ok) {
++          problems.push(`${TUNING_FILENAME}: tokens.${name} dropped (${checked.reason})`)
++          continue
++        }
++        tokens[name] = checked.value
++      }
++      if (Object.keys(tokens).length > 0) tuning.tokens = tokens
++    }
++  }
++
++  if (tuning.background === undefined && tuning.tokens === undefined) {
++    return { tuning: null, problems }
++  }
++  return { tuning, problems }
++}
++
++/**
++ * The scoped rule that applies this tuning's token overrides, or null when
++ * there is nothing to apply.
++ *
++ * The selector is the same scope attribute the runtime stamps and the CSS
++ * safety pipeline scopes under, so an override can only ever affect the skin it
++ * was shipped with.
++ */
++export function tuningTokenCss(skinId: string, tuning: SkinTuning | null): string | null {
++  const tokens = tuning?.tokens
++  if (tokens === undefined) return null
++  const declarations = Object.entries(tokens)
++    .map(([name, value]) => `${name}:${value}`)
++    .join(';')
++  if (declarations === '') return null
++  return `html[data-dsh-skin="${skinId}"]{${declarations}}`
++}
+--- /dev/null	2026-10-01 12:41:45
++++ patched/tests/tuning.spec.ts	2026-10-01 12:41:45
+@@ -0,0 +1,134 @@
++/**
++ * Contract tests for the per-skin `tuning.json` sidecar.
++ *
++ * Two things matter here and they pull in opposite directions:
++ *  - a malformed sidecar must never break a skin (it installs and renders as if
++ *    the file did not exist), so parsing is lenient and total;
++ *  - a token value is injected into a stylesheet, so it must never be able to
++ *    escape its declaration (fail-closed, per value).
++ */
++
++import { describe, expect, it } from 'vitest'
++
++import { parseSkinTuning, tuningTokenCss, TUNING_FILENAME } from '../src/core/tuning.ts'
++
++describe('parseSkinTuning', () => {
++  it('returns nothing for a non-object without throwing', () => {
++    for (const raw of [null, undefined, 42, 'nope', [], true]) {
++      const result = parseSkinTuning(raw)
++      expect(result.tuning).toBeNull()
++      expect(result.problems).toHaveLength(1)
++      expect(result.problems[0]).toContain(TUNING_FILENAME)
++    }
++  })
++
++  it('keeps a background block and clamps it through the shared normalizer', () => {
++    const result = parseSkinTuning({ background: { backgroundOpacity: 999, inputCardBlur: -4, bogus: 1 } })
++    expect(result.tuning?.background).toEqual({ backgroundOpacity: 100, inputCardBlur: 0 })
++    expect(result.problems).toContain(`${TUNING_FILENAME}: background.bogus ignored`)
++  })
++
++  it('reports a background block with no usable field instead of inventing one', () => {
++    const result = parseSkinTuning({ background: { nope: true } })
++    expect(result.tuning).toBeNull()
++    expect(result.problems.join(' ')).toContain('no usable field')
++  })
++
++  it('keeps token overrides', () => {
++    const result = parseSkinTuning({ tokens: { '--dsw-alias-label-tertiary': '#849ab8' } })
++    expect(result.tuning?.tokens).toEqual({ '--dsw-alias-label-tertiary': '#849ab8' })
++    expect(result.problems).toHaveLength(0)
++  })
++
++  it('accepts the value shapes real skins use', () => {
++    const result = parseSkinTuning({
++      tokens: {
++        '--dsw-alias-label-tertiary': '#849ab8',
++        '--dsw-alias-bg-layer-1': 'rgb(10 16 32 / 50%)',
++        '--x-shadow': '0 0 10px rgba(5, 7, 13, 0.9), 0 0 24px #05070d9e',
++        '--x-font': '"Noto Sans SC", system-ui, -apple-system, sans-serif',
++        '--x-size': 'clamp(12px, 1.2vw, 16px)',
++        '--x-url-free': 'linear-gradient(180deg, #0000, #0008)',
++      },
++    })
++    expect(Object.keys(result.tuning?.tokens ?? {})).toHaveLength(6)
++    expect(result.problems).toHaveLength(0)
++  })
++
++  it('drops a token name that is not a custom property', () => {
++    const result = parseSkinTuning({ tokens: { 'color': 'red', '--ok': 'red' } })
++    expect(result.tuning?.tokens).toEqual({ '--ok': 'red' })
++    expect(result.problems.join(' ')).toContain('"color" is not a custom property name')
++  })
++
++  it('fails closed on every value that could escape the declaration', () => {
++    // Each of these would let a value terminate the rule this module builds.
++    const escapes = [
++      'red; } body { display: none',
++      'red}html{display:none',
++      'url(https://example.com/x.png)',
++      'red /* swallow the closing brace */',
++      'red\\3b color: blue',
++      '@import "https://example.com/x.css"',
++      'expression(alert(1))',
++      'a\u0000b',
++    ]
++    for (const value of escapes) {
++      const result = parseSkinTuning({ tokens: { '--x': value } })
++      expect(result.tuning).toBeNull()
++      expect(result.problems).toHaveLength(1)
++    }
++  })
++
++  it('drops an empty, over-long or non-string value', () => {
++    for (const value of ['', '   ', 'a'.repeat(161), 12, null, {}]) {
++      const result = parseSkinTuning({ tokens: { '--x': value } })
++      expect(result.tuning).toBeNull()
++      expect(result.problems).toHaveLength(1)
++    }
++  })
++
++  it('rejects a non-object tokens block', () => {
++    for (const tokens of ['--x: red', 42, null, ['--x']]) {
++      const result = parseSkinTuning({ tokens })
++      expect(result.tuning).toBeNull()
++      expect(result.problems.join(' ')).toContain('"tokens" must be an object')
++    }
++  })
++
++  it('keeps the usable half when one half is broken', () => {
++    const result = parseSkinTuning({ background: { backgroundOpacity: 40 }, tokens: { nope: 'red' } })
++    expect(result.tuning?.background).toEqual({ backgroundOpacity: 40 })
++    expect(result.tuning?.tokens).toBeUndefined()
++    expect(result.problems).toHaveLength(1)
++  })
++
++  it('ignores unknown top-level keys', () => {
++    const result = parseSkinTuning({ background: { inputCardBlur: 12 }, version: 3, notes: 'hello' })
++    expect(result.tuning?.background).toEqual({ inputCardBlur: 12 })
++    expect(result.problems).toHaveLength(0)
++  })
++})
++
++describe('tuningTokenCss', () => {
++  it('scopes the overrides to the skin that shipped them', () => {
++    const css = tuningTokenCss('harbor', { tokens: { '--a': '#fff', '--b': '2px' } })
++    expect(css).toBe('html[data-dsh-skin="harbor"]{--a:#fff;--b:2px}')
++  })
++
++  it('emits nothing when there is nothing to emit', () => {
++    expect(tuningTokenCss('harbor', null)).toBeNull()
++    expect(tuningTokenCss('harbor', {})).toBeNull()
++    expect(tuningTokenCss('harbor', { background: { inputCardBlur: 4 } })).toBeNull()
++    expect(tuningTokenCss('harbor', { tokens: {} })).toBeNull()
++  })
++
++  it('cannot produce a selector escape through the skin id, because parsing already bounded it', () => {
++    // The id lands inside an attribute selector. parseSkinTuning is not the guard
++    // for it; the manifest validator is (SKIN_ID_PATTERN). Assert the shape here
++    // so a future caller that skips validation is visible in the diff.
++    const css = tuningTokenCss('harbor', { tokens: { '--a': 'red' } })
++    expect(css).not.toContain('" onload')
++    expect(css?.startsWith('html[data-dsh-skin="harbor"]{')).toBe(true)
++  })
++})

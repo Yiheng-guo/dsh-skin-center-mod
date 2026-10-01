@@ -27,6 +27,8 @@ import type { EffectLedger } from './effect-ledger.ts'
 import { buildBackgroundMedia, clearLayer, ensureDecorationLayers } from './decoration-layers.ts'
 import type { DecorationLayers } from './decoration-layers.ts'
 import { setSceneBackdropActive } from './backdrop-scene.ts'
+import { tuningTokenCss } from '../../core/tuning.ts'
+import type { SkinTuning } from '../../core/tuning.ts'
 
 /** Catalog entry shape the controller needs (mirrors the v2 catalog route). */
 export interface ControllerSkinEntry {
@@ -42,6 +44,12 @@ export interface ControllerSkinEntry {
     }
     facets?: { client?: { entry: string; apiVersion: string } }
   }
+  /**
+   * The skin's own `tuning.json`, when it ships one. Only the token overrides
+   * are consumed here; the recommended background values are resolved where the
+   * background controls are, so that user values keep winning.
+   */
+  tuning?: SkinTuning
 }
 
 export interface SkinControllerDeps {
@@ -367,6 +375,19 @@ export function createSkinController(deps: SkinControllerDeps): SkinController {
         if (patchesHref !== null) {
           const patchesLink = await loadStylesheet(patchesHref).catch(() => undefined)
           trackStylesheet(activation, 'patches', patchesHref, patchesLink)
+        }
+        // Scoped token overrides from the skin's tuning.json. A <style> is the
+        // right element here, unlike the stylesheet links above: the rule has no
+        // url() to resolve, so it does not depend on being fetched from the
+        // route URL. It is appended after the links, so an equal-specificity
+        // declaration wins on document order without needing !important.
+        const tuningCss = tuningTokenCss(id, entry.tuning ?? null)
+        if (tuningCss !== null) {
+          const tuningStyle = doc.createElement('style')
+          tuningStyle.setAttribute('data-dsh-skin-tuning', id)
+          tuningStyle.textContent = tuningCss
+          doc.head.appendChild(tuningStyle)
+          ledger.record(activation, 'style:tuning', () => tuningStyle.remove())
         }
         if (seq !== latestRequest) throw new StaleSwitch()
         installBackground(activation, entry)

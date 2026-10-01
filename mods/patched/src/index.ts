@@ -42,7 +42,15 @@ export { auditTokenContract } from './core/css-safety/token-audit.ts'
 export type { TokenAuditStylesheet, TokenAuditResult } from './core/css-safety/token-audit.ts'
 export { loadSkinCatalog, findSkin, resolveInsideSkin, userSkinsDir, builtinSkinsDir, canServeSkinHooks } from './skin-repo.ts'
 export type { SkinCatalog, SkinCatalogEntry } from './skin-repo.ts'
-export { defaultActiveStatePath, readActiveSelection, writeActiveSelection } from './active-state.ts'
+export { defaultActiveStatePath, readActiveSelection, writeActiveSelection, readActiveState, writeActiveState } from './active-state.ts'
+export type { ActiveStateFile, ActiveStateUpdate } from './active-state.ts'
+// The background half of the same document: the dsh-skin CLI's `bg` group
+// reads and merge-writes it through these, never through its own parser.
+export {
+  SKIN_BACKGROUND_DEFAULTS,
+  normalizeSkinBackground,
+  resolveSkinBackground,
+} from './core/background.ts'
 
 /** Stable cordis plugin name (matches cordis.patch.yml insert id). */
 export const name = 'ui-skin-center'
