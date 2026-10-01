@@ -8,6 +8,50 @@
 
 ---
 
+## 只想装皮肤、不想看代码？三步
+
+**1. 先有 DSH 和皮肤中心**
+
+装好 DeepSeek 桌面端（DSH），再装上游的皮肤中心插件
+[`@linxin666/dsh-client-ui-skin-center`](https://github.com/zhu1090093659/dsh-skins)。
+
+**2. 把皮肤目录拷进去**
+
+```sh
+git clone https://github.com/Yiheng-guo/dsh-skin-center-mod
+cp -r dsh-skin-center-mod/skins/cyber-maiden ~/.dsh/skins/
+cp -r dsh-skin-center-mod/skins/cyber-abyss  ~/.dsh/skins/
+```
+
+`~/.dsh/skins/` 是 DSH 的用户皮肤目录。两款皮肤一共约 6 MB，**无缝循环视频已经包含在内**，
+不需要另外准备素材。
+
+**3. 重开 DSH，设置 → 皮肤中心，选一款**
+
+觉得背景太抢，就在同一张卡片里调**模糊**和**遮蔽**两个滑杆，实时生效。
+
+皮肤还可以自带一套推荐背景值：写在自己目录下的 `tuning.json` 里。
+**这是一个侧车文件，不改 `skin.json` 的格式**——因为 v2 清单是
+`additionalProperties: false`，往里加字段会让**官方插件直接拒绝这款皮肤**。
+用侧车文件，官方插件完全不认识它，皮肤在两边都能装。
+
+> **下面这些命令行要打了本仓库的补丁才有**，官方插件只带 `validate / install / use / list / current`：
+>
+> ```sh
+> dsh-skin bg get       # 看当前背景参数，并标出哪些是你显式改过的（区分「设成 0」和「没设过」）
+> dsh-skin bg set --occlusion 45 --blur 18/12
+> dsh-skin bg reset     # 清掉你的覆盖，回到当前皮肤的推荐值
+> dsh-skin doctor       # 只打印有问题的地方：被排除的皮肤、警告、选中项已失效
+> ```
+
+---
+
+## 给开发者
+
+这一节往下是补丁、缺陷分析和工具链。
+
+---
+
 ## 一句话起因
 
 皮肤中心的「背景遮蔽」滑杆**对多数皮肤是死的**。
