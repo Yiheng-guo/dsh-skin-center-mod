@@ -1,5 +1,5 @@
---- baseline/src/provenance.ts	2026-10-01 12:46:22
-+++ patched/src/provenance.ts	2026-10-01 12:46:22
+--- baseline/src/provenance.ts	2026-10-01 12:49:13
++++ patched/src/provenance.ts	2026-10-01 12:49:13
 @@ -11,7 +11,10 @@
   *
   * Fail-closed: invalid provenance and any post-install byte mismatch keep the
@@ -465,8 +465,8 @@
        return { ok: true, id: skinId, repairedFiles: item.files.length }
      } finally {
        try {
---- baseline/src/active-state.ts	2026-10-01 12:46:22
-+++ patched/src/active-state.ts	2026-10-01 12:46:22
+--- baseline/src/active-state.ts	2026-10-01 12:49:13
++++ patched/src/active-state.ts	2026-10-01 12:49:13
 @@ -13,6 +13,7 @@
  import { basename, dirname, join } from 'node:path'
  
@@ -488,8 +488,8 @@
    const tmp = join(tmpDir, basename(path))
    const document: { active: string | null; background?: SkinBackgroundConfig; initialized: boolean } = {
      active,
---- /dev/null	2026-10-01 12:46:22
-+++ patched/tests/provenance.spec.ts	2026-10-01 12:46:22
+--- /dev/null	2026-10-01 12:49:13
++++ patched/tests/provenance.spec.ts	2026-10-01 12:49:13
 @@ -0,0 +1,202 @@
 +/**
 + * Provenance tests: truthful repair origin (market trust only for market
@@ -693,8 +693,8 @@
 +    expect(sleeps).toEqual([])
 +  })
 +})
---- baseline/tests/active-state.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/active-state.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/active-state.spec.ts	2026-10-01 12:49:13
++++ patched/tests/active-state.spec.ts	2026-10-01 12:49:13
 @@ -1,10 +1,12 @@
 -import { mkdtempSync, readFileSync, readdirSync, renameSync } from 'node:fs'
 +import { mkdtempSync, readFileSync, readdirSync, renameSync, statSync, utimesSync } from 'node:fs'

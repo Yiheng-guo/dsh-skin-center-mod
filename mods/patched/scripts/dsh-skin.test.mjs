@@ -273,3 +273,46 @@ test('validate warns (not fails) on a partial primary-action token set', () => {
   assert.match(r.out, /warning: primary action contrast/)
   rmSync(root, { recursive: true, force: true })
 })
+
+test('doctor is silent and exits 0 for a clean catalog', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-skin-fixture-'))
+  const dir = fixtureSkin(root, 'demo')
+  const install = run(['install', dir])
+  assert.equal(install.code, 0, install.out)
+  // run() makes a fresh home per invocation; a second command must be pointed at
+  // the one the first command populated.
+  const r = run(['doctor'], { DSH_HOME: join(install.home, '.dsh') })
+  assert.equal(r.code, 0, r.out)
+  assert.match(r.out, /no problems detected/)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('doctor surfaces a warning that list buries in the inventory', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-skin-fixture-'))
+  // A background media path outside assets/ and preview/ validates and installs,
+  // then fails to load with nothing said anywhere. doctor is where it is said.
+  const dir = fixtureSkin(root, 'demo', {
+    contributes: {
+      stylesheet: 'skin.css',
+      backgroundMedia: { light: { type: 'image', src: 'media/bg.webp' } },
+    },
+  })
+  const install = run(['install', dir])
+  assert.equal(install.code, 0, install.out)
+  const r = run(['doctor'], { DSH_HOME: join(install.home, '.dsh') })
+  assert.equal(r.code, 1)
+  assert.match(r.out, /outside the served assets\/ and preview\/ directories/)
+  rmSync(root, { recursive: true, force: true })
+})
+
+test('doctor names a selection that is not in the catalog', () => {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-skin-fixture-'))
+  const r = run(['doctor'])
+  // doctor is read-only, so the state directory does not exist yet
+  mkdirSync(join(r.home, '.dsh'), { recursive: true })
+  writeFileSync(stateFile(r.home), JSON.stringify({ active: 'ghost', initialized: true }))
+  const after = run(['doctor'], { DSH_HOME: join(r.home, '.dsh') })
+  assert.equal(after.code, 1)
+  assert.match(after.out, /"ghost" is not in the catalog/)
+  rmSync(root, { recursive: true, force: true })
+})

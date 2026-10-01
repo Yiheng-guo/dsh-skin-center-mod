@@ -1,5 +1,5 @@
---- baseline/src/client/runtime/skin-controller.ts	2026-10-01 12:46:22
-+++ patched/src/client/runtime/skin-controller.ts	2026-10-01 12:46:22
+--- baseline/src/client/runtime/skin-controller.ts	2026-10-01 12:49:13
++++ patched/src/client/runtime/skin-controller.ts	2026-10-01 12:49:13
 @@ -27,6 +27,8 @@
  import { buildBackgroundMedia, clearLayer, ensureDecorationLayers } from './decoration-layers.ts'
  import type { DecorationLayers } from './decoration-layers.ts'
@@ -104,8 +104,8 @@
          }
          if (seq !== latestRequest) throw new StaleSwitch()
          installBackground(activation, entry)
---- baseline/tests/skin-runtime.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/skin-runtime.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/skin-runtime.spec.ts	2026-10-01 12:49:13
++++ patched/tests/skin-runtime.spec.ts	2026-10-01 12:49:13
 @@ -338,11 +338,13 @@
        for (const bad of options.failFetchFor ?? []) {
          if (href.includes(bad)) throw new Error(`load ${href} -> 500`)

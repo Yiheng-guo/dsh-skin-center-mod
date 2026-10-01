@@ -1,5 +1,5 @@
---- baseline/src/core/manifest-v2/validate.ts	2026-10-01 12:46:22
-+++ patched/src/core/manifest-v2/validate.ts	2026-10-01 12:46:22
+--- baseline/src/core/manifest-v2/validate.ts	2026-10-01 12:49:13
++++ patched/src/core/manifest-v2/validate.ts	2026-10-01 12:49:13
 @@ -19,7 +19,21 @@
  import type { SkinManifestV2, SkinManifestValidation } from './types.ts'
  
@@ -23,8 +23,8 @@
  const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
  const HEX_COLOR = /^#[0-9a-fA-F]{6}$/
  const API_VERSION = /^x-org\.linxin666\.skin-center\/[a-z0-9]+$/
---- baseline/src/tap-index-adapter.ts	2026-10-01 12:46:22
-+++ patched/src/tap-index-adapter.ts	2026-10-01 12:46:22
+--- baseline/src/tap-index-adapter.ts	2026-10-01 12:49:13
++++ patched/src/tap-index-adapter.ts	2026-10-01 12:49:13
 @@ -12,6 +12,7 @@
   */
  
@@ -45,8 +45,8 @@
  
  /** Stamp or replace data-dsh-skin on the <html> tag. */
  export function stampSkinAttribute(html: string, skinId: string): string {
---- baseline/tests/manifest-v2.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/manifest-v2.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/manifest-v2.spec.ts	2026-10-01 12:49:13
++++ patched/tests/manifest-v2.spec.ts	2026-10-01 12:49:13
 @@ -163,6 +163,19 @@
      }
    })
@@ -67,8 +67,8 @@
    it('keeps legacy v1 manifests on the deprecated allowlist (never unknown-field)', () => {
      // The shape every retired v1 skin.json shared: v1-only fields
      // (package / wiring / bodyAttr) and no v2 structure at all.
---- baseline/tests/tap-index-adapter.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/tap-index-adapter.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/tap-index-adapter.spec.ts	2026-10-01 12:49:13
++++ patched/tests/tap-index-adapter.spec.ts	2026-10-01 12:49:13
 @@ -5,6 +5,7 @@
  import { describe, expect, it } from 'vitest'
  

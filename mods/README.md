@@ -306,6 +306,18 @@ applied, stops while the page is hidden, and never fights an edit in flight. It
 keeps its own cursor — the last value IT applied — so a card edit that has not
 been POSTed yet is not reverted, and an apply cannot echo back as a write.
 
+**`dsh-skin doctor` — where a silent failure is visible today.** `list`
+already printed these warnings inline, and that is exactly how they get skimmed
+past: an inventory reads as information, so a warning inside one does too. doctor
+prints ONLY problems — excluded skins with their errors, per-skin warnings, and a
+selection that is not in the catalog (which the GUI silently renders as the
+official look) — and exits non-zero when there are any, so it works as a script
+check.
+
+This is also what stands in for the withdrawn skin-health card: it is the same
+data, minus the per-rule adapter counters, which live in the page rather than in
+the host and therefore are not reachable from a CLI.
+
 **The CLI's advice was wrong.** `dsh-skin use` printed "reload the GUI to apply"
 while the follow makes it land within the poll interval. Corrected.
 
@@ -439,7 +451,7 @@ overlooked:
 
 ## Withdrawn, and what is still open
 
-Recorded here rather than quietly dropped, because both affect what this patch
+Recorded here rather than quietly dropped, because they affect what this patch
 set actually delivers.
 
 **Withdrawn: the skin-health card UI.** The card surface that consumed the

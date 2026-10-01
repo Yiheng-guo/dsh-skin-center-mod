@@ -1,5 +1,5 @@
---- baseline/src/we-routes.ts	2026-10-01 12:46:22
-+++ patched/src/we-routes.ts	2026-10-01 12:46:22
+--- baseline/src/we-routes.ts	2026-10-01 12:49:13
++++ patched/src/we-routes.ts	2026-10-01 12:49:13
 @@ -32,7 +32,7 @@
   * @module @linxin666/dsh-client-ui-skin-center/we-routes
   */
@@ -50,8 +50,8 @@
      },
    })
  
---- baseline/tests/we-routes.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/we-routes.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/we-routes.spec.ts	2026-10-01 12:49:13
++++ patched/tests/we-routes.spec.ts	2026-10-01 12:49:13
 @@ -6,7 +6,7 @@
   * same-origin fence on POST routes.
   */

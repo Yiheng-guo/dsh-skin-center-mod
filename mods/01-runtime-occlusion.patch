@@ -1,5 +1,5 @@
---- baseline/src/client/background.ts	2026-10-01 12:46:22
-+++ patched/src/client/background.ts	2026-10-01 12:46:22
+--- baseline/src/client/background.ts	2026-10-01 12:49:13
++++ patched/src/client/background.ts	2026-10-01 12:49:13
 @@ -32,8 +32,13 @@
  import {
    resolveSkinBackground,

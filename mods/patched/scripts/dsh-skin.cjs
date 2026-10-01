@@ -232,6 +232,46 @@ async function cmdList() {
   console.log(`active: ${active === null ? 'none (official)' : active}`)
 }
 
+/**
+ * `dsh-skin doctor` — every problem the catalog found, and nothing else.
+ *
+ * `list` already prints the same warnings inline, and that is exactly how they
+ * get skimmed past: an inventory reads as information, so a warning inside one
+ * does too. This prints ONLY problems, exits non-zero when there are any, and is
+ * therefore usable as a check in a script or a pre-commit hook. The skin-health
+ * card was meant to be the in-GUI counterpart; it is not shipped (see
+ * mods/README.md), so this is where a silent failure becomes visible today.
+ */
+async function cmdDoctor() {
+  const lib = await loadLib()
+  const catalog = lib.loadSkinCatalog()
+  const active = lib.readActiveSelection(lib.defaultActiveStatePath())
+  console.log('dsh-skin doctor')
+  console.log(`  catalog: ${catalog.skins.length} skin(s), ${catalog.diagnostics.length} excluded`)
+  console.log(`  active : ${active === null ? 'none (official look)' : active}`)
+
+  let problems = 0
+  for (const diag of catalog.diagnostics) {
+    problems += 1
+    console.log(`  ! excluded ${diag.subject} [${diag.origin}]`)
+    for (const error of diag.errors) console.log(`      ${error}`)
+  }
+  for (const skin of catalog.skins) {
+    if (skin.warnings.length === 0) continue
+    problems += 1
+    console.log(`  ! ${skin.manifest.id} [${skin.origin}]: ${skin.warnings.length} warning(s)`)
+    for (const warning of skin.warnings) console.log(`      ${warning}`)
+  }
+  // A selection that is not in the catalog is silent in the GUI: the page simply
+  // renders the official look, which reads as "the skin did nothing".
+  if (active !== null && !catalog.skins.some((skin) => skin.manifest.id === active)) {
+    problems += 1
+    console.log(`  ! the active selection "${active}" is not in the catalog; the GUI falls back to the official look`)
+  }
+  console.log(problems === 0 ? '  no problems detected' : `  ${problems} problem(s)`)
+  process.exit(problems === 0 ? 0 : 1)
+}
+
 async function cmdCurrent() {
   const lib = await loadLib()
   const active = lib.readActiveSelection(lib.defaultActiveStatePath())
@@ -406,6 +446,8 @@ function usage(exitCode) {
   console.log('                                     --blur <empty>/<content> (each 0-20)  --input-blur <0-20>')
   console.log('                                     --bubble <0-100>         --bubble-blur <0-20>')
   console.log('  dsh-skin bg reset                drop every background override (all fields back to defaults)')
+  console.log('  dsh-skin doctor                  print only the problems the catalog found (excluded skins,')
+  console.log('                                   warnings, a selection missing from the catalog); exits 1 if any')
   process.exit(exitCode)
 }
 
@@ -419,6 +461,7 @@ async function main() {
     case 'uninstall': return cmdUninstall(positional)
     case 'use': return cmdUse(positional)
     case 'list': return cmdList()
+    case 'doctor': return cmdDoctor()
     case 'current': return cmdCurrent()
     case 'bg': return cmdBackground(arg, rest)
     default: return usage(cmd === undefined ? 0 : 1)

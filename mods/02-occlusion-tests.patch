@@ -1,5 +1,5 @@
---- baseline/tests/background.spec.ts	2026-10-01 12:46:22
-+++ patched/tests/background.spec.ts	2026-10-01 12:46:22
+--- baseline/tests/background.spec.ts	2026-10-01 12:49:13
++++ patched/tests/background.spec.ts	2026-10-01 12:49:13
 @@ -7,6 +7,7 @@
   * client wiring uses.
   */
