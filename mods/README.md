@@ -365,7 +365,7 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 691 passed / 15 failed — **zero regressions**, see below |
+| `pnpm test` | 696 passed / 15 failed — **zero regressions**, see below |
 | `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
@@ -373,7 +373,7 @@ Controlled experiment, both runs in the identical `skins/` state:
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 706 | 15 | **691** |
+| these patches | 711 | 15 | **696** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
@@ -381,7 +381,7 @@ Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository'
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
 checkout. **Zero AssertionError / TypeError / ReferenceError** on both sides of the
-experiment. The 67 added tests all pass (691 − 624), and every fix in this series
+experiment. The 72 added tests all pass (696 − 624), and every fix in this series
 was individually proven to fail when its source change is reverted.
 
 Reproducibility: applying the thirteen patches to the pristine files reproduces
@@ -418,15 +418,16 @@ a settings card that hangs the page, `SkinCenter.tsx`, `locales.ts` and
 half: per-rule counters plus `GET /v2/diagnostics` (patch 08). Re-adding the card
 surface needs a fresh implementation, not a rebase of the withdrawn one.
 
-**Open: the recommendation half of the sidecar.** `tuning.json`'s `tokens` are
-fully consumed (patch 06 applies them scoped; patch 10 parses them). Its
-`background` block is parsed, validated, exposed on the catalog entry, and the
-controller can merge it (`{...defaults, ...recommendation, ...stored}`, patch 01),
-but **nothing yet feeds the recommendation into the controller**, so the
-background half is inert. The remaining step is small and its shape is known:
-push the active entry's `tuning.background` into the controller whenever the
-active skin resolves (the follow in patch 11 already sees `active` on every
-tick), and add the "restore skin defaults" affordance.
+**Wired: the recommendation half of the sidecar.** Both halves of
+`tuning.json` are now consumed. The `tokens` half is applied scoped by the skin
+controller (patch 06); the `background` half is pushed to the controller by the
+selection follow, which already reads `active` on every tick, and merged per
+field as `{...defaults, ...recommendation, ...stored}` (patch 01). The push is
+placed before the follow's "background changed" early return on purpose:
+switching to a skin whose values happen to match still changes that skin's
+advice. `setRecommended` is a no-op for an equal recommendation, so pushing on
+every tick cannot make the card re-render, and `dsh-skin bg reset` returns to
+the active skin's advice.
 
 **Not attempted, with reasons.** F18's D3 (bind a WE preview token to a file
 rather than a directory, and stop `/web/` following symlinks) — a real security

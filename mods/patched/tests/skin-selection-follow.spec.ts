@@ -56,10 +56,12 @@ function activeAnswer(
 function fakeBackground(initial: SkinBackgroundConfig | null = null): {
   handle: SkinBackgroundTarget
   inits: Array<SkinBackgroundConfig | null>
+  recommended: Array<SkinBackgroundConfig | null>
   live: () => Required<SkinBackgroundConfig>
   edit: (patch: SkinBackgroundConfig) => void
 } {
   const inits: Array<SkinBackgroundConfig | null> = []
+  const recommended: Array<SkinBackgroundConfig | null> = []
   let live = resolveSkinBackground(initial)
   return {
     handle: {
@@ -67,8 +69,12 @@ function fakeBackground(initial: SkinBackgroundConfig | null = null): {
         inits.push(next)
         live = resolveSkinBackground(next)
       },
+      // The interface requires this now: the follow pushes the active skin's
+      // tuning.json advice so the controller can merge it per field.
+      setRecommended: (next: SkinBackgroundConfig | null) => { recommended.push(next) },
     },
     inits,
+    recommended,
     live: () => live,
     /** A card edit: the live value moves immediately, its debounced POST has not landed. */
     edit: (patch: SkinBackgroundConfig) => { live = resolveSkinBackground({ ...live, ...patch }) },
@@ -387,4 +393,38 @@ describe('persisted background convergence', () => {
     expect(switched).toEqual(['harbor'])
     stop()
   })
+})
+
+describe('active skin background recommendation (tuning.json)', () => {
+  // The controller merges the active skin's advice per field, so the follow has
+  // to hand it over whenever the active skin changes — including a switch to a
+  // skin whose background values happen to match, which is why the push cannot
+  // live behind the "background changed" test.
+  it('pushes the new skin advice on a switch, and null for a skin that ships none', async () => {
+    vi.useFakeTimers()
+    let active = 'harbor'
+    const background = fakeBackground(null)
+    const { store } = fakeStore({
+      fetchImpl: activeAnswer(() => active),
+      catalog: [
+        catalogSkin('harbor'),
+        { ...catalogSkin('mint'), tuning: { background: { backgroundOpacity: 45, inputCardBlur: 4 } } },
+      ],
+      background: background.handle,
+    })
+    const stop = watchPersistedSelection(store)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Then the skin that ships no tuning clears any advice, so the defaults hold
+    expect(background.recommended).toEqual([null])
+
+    // When the selection moves to a skin that does ship advice
+    active = 'mint'
+    await vi.advanceTimersByTimeAsync(2500)
+
+    // Then the controller was handed exactly that advice
+    expect(background.recommended).toContainEqual({ backgroundOpacity: 45, inputCardBlur: 4 })
+    stop()
+  })
+
 })

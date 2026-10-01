@@ -32,6 +32,7 @@
 import {
   resolveSkinBackground,
   SKIN_BACKGROUND_DEFAULTS,
+  SKIN_BACKGROUND_FIELDS,
   type SkinBackgroundConfig,
 } from '../core/background.ts'
 import {
@@ -128,6 +129,14 @@ export interface SkinBackgroundHandle {
  * Own the background preference set: apply the values to the body instantly
  * and persist user edits through the caller-provided channel.
  */
+/** Null-safe equality on the resolved fields of two recommendations. */
+function sameRecommendation(a: SkinBackgroundConfig | null, b: SkinBackgroundConfig | null): boolean {
+  if (a === null || b === null) return a === b
+  const left = resolveSkinBackground(a)
+  const right = resolveSkinBackground(b)
+  return SKIN_BACKGROUND_FIELDS.every((field) => left[field] === right[field])
+}
+
 export class BackgroundController implements SkinBackgroundHandle {
   private enabledValue = SKIN_BACKGROUND_DEFAULTS.enabled
   private opacityValue = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
@@ -152,6 +161,16 @@ export class BackgroundController implements SkinBackgroundHandle {
   /** Currently applied veil alpha 0..1 (cached against redundant style writes). */
   private appliedScrim: number | null = null
   /** The body MutationObserver, installed lazily once a blur is active. */
+  /**
+   * The active skin's recommendation, when one has been pushed in. Read by
+   * every `assign`, so it applies to whatever config arrives next without the
+   * caller having to know about it.
+   */
+  private recommendedValue: SkinBackgroundConfig | null = null
+  /** True once a push has happened, after which the pushed value is the source. */
+  private recommendedPushed = false
+  /** The last config handed to `assign`, so a new recommendation can re-merge it. */
+  private lastConfig: SkinBackgroundConfig = {}
   private observer: MutationObserver | null = null
   /** Pending requestAnimationFrame id for a coalesced recheck. */
   private rafId: number | null = null
@@ -200,6 +219,30 @@ export class BackgroundController implements SkinBackgroundHandle {
   init(next: SkinBackgroundConfig | null): void {
     if (this.disposed) return
     this.assign(next ?? {})
+    this.applyOcclusion()
+    this.applyInputCardBlur()
+    this.applyBubbleOpacity()
+    this.applyBubbleBlur()
+    this.syncBlur()
+    this.publish()
+  }
+
+  /**
+   * Adopt the active skin's recommended values.
+   *
+   * Pushed rather than pulled: the skin that is active changes on its own
+   * schedule (the selection follow), and the controller has no way to ask for it
+   * without depending on the skin store. A no-op when the recommendation is
+   * unchanged, so the caller may push on every poll tick without cost, and the
+   * merge itself is per field, so a user value always wins over it.
+   * @param next - the recommendation, or null to clear it.
+   */
+  setRecommended(next: SkinBackgroundConfig | null): void {
+    if (this.disposed) return
+    this.recommendedPushed = true
+    if (sameRecommendation(this.recommendedValue, next)) return
+    this.recommendedValue = next
+    this.assign(this.lastConfig)
     this.applyOcclusion()
     this.applyInputCardBlur()
     this.applyBubbleOpacity()
@@ -322,8 +365,9 @@ export class BackgroundController implements SkinBackgroundHandle {
    * discard the rest of the skin's advice.
    */
   private assign(config: SkinBackgroundConfig): void {
-    const recommended = this.recommended() ?? {}
-    const resolved = resolveSkinBackground({ ...recommended, ...config })
+    this.lastConfig = config
+    const recommended = this.recommendedPushed ? this.recommendedValue : this.recommended()
+    const resolved = resolveSkinBackground({ ...(recommended ?? {}), ...config })
     this.enabledValue = resolved.enabled
     this.opacityValue = resolved.backgroundOpacity
     this.blurEmptyValue = resolved.backgroundBlurEmpty

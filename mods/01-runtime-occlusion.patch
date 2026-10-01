@@ -1,7 +1,10 @@
---- baseline/src/client/background.ts	2026-10-01 12:41:45
-+++ patched/src/client/background.ts	2026-10-01 12:41:45
-@@ -34,6 +34,10 @@
+--- baseline/src/client/background.ts	2026-10-01 12:44:19
++++ patched/src/client/background.ts	2026-10-01 12:44:19
+@@ -32,8 +32,13 @@
+ import {
+   resolveSkinBackground,
    SKIN_BACKGROUND_DEFAULTS,
++  SKIN_BACKGROUND_FIELDS,
    type SkinBackgroundConfig,
  } from '../core/background.ts'
 +import {
@@ -11,7 +14,7 @@
  
  /** The namespace string the Host registers (mirrors src/index.ts). */
  export const SKIN_BACKGROUND_NS = 'skin-background'
-@@ -65,8 +69,12 @@
+@@ -65,8 +70,12 @@
  /** CSS custom property consumed by skins that expose a bubble backdrop blur. */
  export const BUBBLE_BLUR_VAR = '--dsh-skin-bubble-blur'
  
@@ -26,7 +29,7 @@
  
  /** Default occlusion (0 = no extra veil) when the section carries none. */
  export const DEFAULT_OPACITY = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
-@@ -117,22 +125,6 @@
+@@ -117,25 +126,17 @@
  }
  
  /**
@@ -49,7 +52,18 @@
   * Own the background preference set: apply the values to the body instantly
   * and persist user edits through the caller-provided channel.
   */
-@@ -150,6 +142,15 @@
++/** Null-safe equality on the resolved fields of two recommendations. */
++function sameRecommendation(a: SkinBackgroundConfig | null, b: SkinBackgroundConfig | null): boolean {
++  if (a === null || b === null) return a === b
++  const left = resolveSkinBackground(a)
++  const right = resolveSkinBackground(b)
++  return SKIN_BACKGROUND_FIELDS.every((field) => left[field] === right[field])
++}
++
+ export class BackgroundController implements SkinBackgroundHandle {
+   private enabledValue = SKIN_BACKGROUND_DEFAULTS.enabled
+   private opacityValue = SKIN_BACKGROUND_DEFAULTS.backgroundOpacity
+@@ -150,7 +151,26 @@
    private blurElement: HTMLDivElement | null = null
    /** Currently applied backdrop-filter blur px (cached to avoid redundant style writes during streaming). */
    private appliedBlur: number | null = null
@@ -63,14 +77,23 @@
 +  /** Currently applied veil alpha 0..1 (cached against redundant style writes). */
 +  private appliedScrim: number | null = null
    /** The body MutationObserver, installed lazily once a blur is active. */
++  /**
++   * The active skin's recommendation, when one has been pushed in. Read by
++   * every `assign`, so it applies to whatever config arrives next without the
++   * caller having to know about it.
++   */
++  private recommendedValue: SkinBackgroundConfig | null = null
++  /** True once a push has happened, after which the pushed value is the source. */
++  private recommendedPushed = false
++  /** The last config handed to `assign`, so a new recommendation can re-merge it. */
++  private lastConfig: SkinBackgroundConfig = {}
    private observer: MutationObserver | null = null
    /** Pending requestAnimationFrame id for a coalesced recheck. */
-@@ -161,10 +162,28 @@
+   private rafId: number | null = null
+@@ -161,10 +181,28 @@
     * @param initial - values known at construction (the local settings scope
     *   snapshot on loopback); null starts from defaults until init() arrives.
     * @param persist - persistence channel for user edits (v2 /active POST).
--   */
--  constructor(initial: SkinBackgroundConfig | null, persist: (next: SkinBackgroundConfig) => void) {
 +   * @param recommended - the active skin's recommended values from its
 +   *   `tuning.json`, consulted per field. Precedence is
 +   *   default < recommendation < stored user value, so a skin's advice applies
@@ -80,7 +103,8 @@
 +   *   recommendation into the stored config. A genuine user edit does persist
 +   *   the full snapshot, advice included — that is the user's own action, and
 +   *   after it their value wins everywhere it speaks.
-+   */
+    */
+-  constructor(initial: SkinBackgroundConfig | null, persist: (next: SkinBackgroundConfig) => void) {
 +  constructor(
 +    initial: SkinBackgroundConfig | null,
 +    persist: (next: SkinBackgroundConfig) => void,
@@ -97,7 +121,38 @@
      this.applyOcclusion()
      this.applyInputCardBlur()
      this.applyBubbleOpacity()
-@@ -283,6 +302,8 @@
+@@ -189,6 +227,30 @@
+     this.publish()
+   }
+ 
++  /**
++   * Adopt the active skin's recommended values.
++   *
++   * Pushed rather than pulled: the skin that is active changes on its own
++   * schedule (the selection follow), and the controller has no way to ask for it
++   * without depending on the skin store. A no-op when the recommendation is
++   * unchanged, so the caller may push on every poll tick without cost, and the
++   * merge itself is per field, so a user value always wins over it.
++   * @param next - the recommendation, or null to clear it.
++   */
++  setRecommended(next: SkinBackgroundConfig | null): void {
++    if (this.disposed) return
++    this.recommendedPushed = true
++    if (sameRecommendation(this.recommendedValue, next)) return
++    this.recommendedValue = next
++    this.assign(this.lastConfig)
++    this.applyOcclusion()
++    this.applyInputCardBlur()
++    this.applyBubbleOpacity()
++    this.applyBubbleBlur()
++    this.syncBlur()
++    this.publish()
++  }
++
+   /** The current values as a persistable config (every field concrete). */
+   snapshot(): SkinBackgroundConfig {
+     return {
+@@ -283,6 +345,8 @@
        this.rafId = null
      }
      this.removeBlurElement()
@@ -106,7 +161,7 @@
      document.body.style.removeProperty(INPUT_CARD_BLUR_VAR)
      document.body.style.removeProperty(BUBBLE_ALPHA_VAR)
      document.body.style.removeProperty(BUBBLE_BLUR_VAR)
-@@ -292,9 +313,17 @@
+@@ -292,9 +356,18 @@
      }
    }
  
@@ -121,12 +176,13 @@
 +   */
    private assign(config: SkinBackgroundConfig): void {
 -    const resolved = resolveSkinBackground(config)
-+    const recommended = this.recommended() ?? {}
-+    const resolved = resolveSkinBackground({ ...recommended, ...config })
++    this.lastConfig = config
++    const recommended = this.recommendedPushed ? this.recommendedValue : this.recommended()
++    const resolved = resolveSkinBackground({ ...(recommended ?? {}), ...config })
      this.enabledValue = resolved.enabled
      this.opacityValue = resolved.backgroundOpacity
      this.blurEmptyValue = resolved.backgroundBlurEmpty
-@@ -336,13 +365,17 @@
+@@ -336,13 +409,17 @@
      document.body.style.setProperty(BUBBLE_BLUR_VAR, this.bubbleBlurValue + 'px')
    }
  
@@ -147,7 +203,7 @@
    }
  
    /**
-@@ -352,6 +385,10 @@
+@@ -352,6 +429,10 @@
     */
    private syncBlur(): void {
      if (this.disposed) return
@@ -158,7 +214,7 @@
      if (this.hasWallpaper()) {
        // The wallpaper module owns its own blur (wallpaperBlur); the skin-center
        // background blur layer must stay off while a wallpaper is mounted so
-@@ -369,9 +406,14 @@
+@@ -369,9 +450,14 @@
      else this.removeBlurElement()
    }
  
@@ -175,7 +231,7 @@
    }
  
    /** True while a Wallpaper Engine wallpaper is mounted. */
-@@ -388,6 +430,7 @@
+@@ -388,6 +474,7 @@
        element.style.zIndex = '-1'
        element.style.pointerEvents = 'none'
        element.setAttribute('aria-hidden', 'true')
@@ -183,10 +239,12 @@
        this.blurElement = element
        document.body.appendChild(element)
        this.appliedBlur = null
-@@ -400,6 +443,52 @@
+@@ -398,8 +485,54 @@
+     this.blurElement.style.backdropFilter = blur
+     // Safari: the vendor-prefixed form is only reachable via setProperty.
      this.blurElement.style.setProperty('-webkit-backdrop-filter', blur)
-   }
- 
++  }
++
 +  /**
 +   * Apply the occlusion veil. Mirrors {@link syncBlur}: off under the master
 +   * switch, off while a wallpaper owns the background (the wallpaper module
@@ -199,8 +257,8 @@
 +      return
 +    }
 +    this.ensureScrimElement(this.opacityValue / 100)
-+  }
-+
+   }
+ 
 +  /** Create (if needed) and paint the fixed occlusion veil. */
 +  private ensureScrimElement(active: number): void {
 +    if (this.scrimElement === null) {

@@ -1,5 +1,5 @@
---- baseline/scripts/dsh-skin.cjs	2026-10-01 12:41:45
-+++ patched/scripts/dsh-skin.cjs	2026-10-01 12:41:45
+--- baseline/scripts/dsh-skin.cjs	2026-10-01 12:44:19
++++ patched/scripts/dsh-skin.cjs	2026-10-01 12:44:19
 @@ -7,8 +7,9 @@
   * Skins are pure asset directories (skin.json + skin.css + optional
   * patches.css / hooks.mjs / assets/). The skin-center package is the only
@@ -267,8 +267,8 @@
      default: return usage(cmd === undefined ? 0 : 1)
    }
  }
---- baseline/scripts/dsh-skin.test.mjs	2026-10-01 12:41:45
-+++ patched/scripts/dsh-skin.test.mjs	2026-10-01 12:41:45
+--- baseline/scripts/dsh-skin.test.mjs	2026-10-01 12:44:19
++++ patched/scripts/dsh-skin.test.mjs	2026-10-01 12:44:19
 @@ -1,6 +1,6 @@
  /**
 - * Tests for scripts/dsh-skin (v2): validate / install / use / list / current
@@ -411,8 +411,8 @@
  test('use rejects an unknown skin', () => {
    const r = run(['use', 'no-such-skin'])
    assert.equal(r.code, 1)
---- baseline/src/client/runtime/boot.ts	2026-10-01 12:41:45
-+++ patched/src/client/runtime/boot.ts	2026-10-01 12:41:45
+--- baseline/src/client/runtime/boot.ts	2026-10-01 12:44:19
++++ patched/src/client/runtime/boot.ts	2026-10-01 12:44:19
 @@ -12,6 +12,7 @@
   * @module @linxin666/dsh-client-ui-skin-center/runtime/boot
   */
@@ -421,7 +421,20 @@
  import { createEffectLedger } from './effect-ledger.ts'
  import { createSemanticAdapter } from './semantic-adapter.ts'
  import type { SemanticAdapter } from './semantic-adapter.ts'
-@@ -44,6 +45,21 @@
+@@ -23,6 +24,12 @@
+ export interface CatalogSkin {
+   origin: 'builtin' | 'user'
+   warnings: string[]
++  /**
++   * The skin's optional tuning.json, already validated by the catalog scan. Only
++   * the background block is read here; the token half is applied by the skin
++   * controller when it activates the skin.
++   */
++  tuning?: { background?: SkinBackgroundConfig }
+   manifest: ControllerSkinEntry['manifest'] & {
+     name: string
+     nameEn: string
+@@ -44,6 +51,27 @@
    errors: string[]
  }
  
@@ -438,12 +451,18 @@
 +export interface SkinBackgroundTarget {
 +  /** Replace the applied config with an externally sourced one; never persists. */
 +  init(next: SkinBackgroundConfig | null): void
++  /**
++   * Adopt the active skin's recommended values. A no-op when the recommendation
++   * is unchanged, so the follow may push on every tick; the merge is per field,
++   * so a stored user value still wins over the advice.
++   */
++  setRecommended(next: SkinBackgroundConfig | null): void
 +}
 +
  export interface SkinRuntimeStore {
    readonly controller: SkinController
    readonly adapter: SemanticAdapter
-@@ -59,6 +75,12 @@
+@@ -59,6 +87,12 @@
    readonly apiBase: string
    /** The fetch seat this store uses (injectable for tests). */
    readonly fetchImpl: typeof fetch
@@ -456,7 +475,7 @@
    /** Loaded catalog snapshot (null until the first fetch resolves). */
    catalog(): CatalogSkin[] | null
    diagnostics(): CatalogDiagnostic[]
-@@ -78,6 +100,13 @@
+@@ -78,6 +112,13 @@
    fetchImpl?: typeof fetch
    /** Background-media priority: true suppresses skin manifest media (WE wallpaper wins). */
    suppressBackgroundMedia?: () => boolean
@@ -470,7 +489,7 @@
  }
  
  export function bootSkinRuntime(options: BootOptions = {}): SkinRuntimeStore {
-@@ -135,6 +164,7 @@
+@@ -135,6 +176,7 @@
      window: doc.defaultView ?? window,
      apiBase,
      fetchImpl,
@@ -478,7 +497,7 @@
      catalog: () => catalog,
      diagnostics: () => diagnostics,
      refreshCatalog,
-@@ -232,8 +262,14 @@
+@@ -232,8 +274,14 @@
  /** Polling cadence for a selection changed outside this page. */
  const SELECTION_POLL_MS = 2000
  
@@ -495,7 +514,7 @@
    let res: Response
    try {
      res = await store.fetchImpl(`${store.apiBase}/active`)
-@@ -241,16 +277,33 @@
+@@ -241,14 +289,31 @@
      return undefined
    }
    if (!res.ok) return undefined
@@ -517,8 +536,8 @@
 +    ? raw as SkinBackgroundConfig
 +    : null
 +  return { active, background }
- }
- 
++}
++
 +/** True when two background configs resolve to the same applied field values. */
 +function sameBackground(
 +  a: SkinBackgroundConfig | null | undefined,
@@ -527,12 +546,10 @@
 +  const left = resolveSkinBackground(a)
 +  const right = resolveSkinBackground(b)
 +  return SKIN_BACKGROUND_FIELDS.every((field) => left[field] === right[field])
-+}
-+
+ }
+ 
  /**
-  * Converge on the skin the persisted selection names, re-reading the catalog
-  * first when the id is not in the current snapshot (a workshop install lands
-@@ -297,7 +350,7 @@
+@@ -297,7 +362,7 @@
  }
  
  /**
@@ -541,7 +558,7 @@
   *
   * Applying a skin and saving that choice are one action in the GUI, but the
   * choice is persisted for the NEXT page load. The conventional route is the
-@@ -307,7 +360,11 @@
+@@ -307,7 +372,11 @@
   * written twice, and this page reads it back rather than assuming it owns
   * every write (issue #1740).
   *
@@ -554,7 +571,7 @@
   * already applied, and it stops while the page is hidden.
   * @param store - the booted runtime store.
   * @param intervalMs - polling cadence in milliseconds.
-@@ -318,6 +375,7 @@
+@@ -318,17 +387,49 @@
    intervalMs: number = SELECTION_POLL_MS,
  ): () => void {
    let applied: string | null | undefined
@@ -562,8 +579,21 @@
    // Window timers, not the ambient ones: the two are different types once
    // Node's globals are in the program (index.ts / boot.ts both are).
    let timer: number | null = null
-@@ -325,10 +383,24 @@
+   let stopped = false
  
++  /**
++   * The active skin's recommended background values, or null.
++   *
++   * Read from the catalog the store already holds, so this costs a lookup on a
++   * list the page already has. A skin that ships no tuning, or whose tuning
++   * carries no background block, answers null and the defaults hold.
++   */
++  const recommendedFor = (id: string | null): SkinBackgroundConfig | null => {
++    if (id === null) return null
++    const entry = (store.catalog() ?? []).find((skin) => skin.manifest.id === id)
++    return (entry?.tuning?.background as SkinBackgroundConfig | undefined) ?? null
++  }
++
    const tick = async (): Promise<void> => {
      if (stopped) return
 -    const next = await readPersistedSelection(store)
@@ -576,6 +606,10 @@
 +      applied = next.active
 +      await convergeOnSelection(store, next.active)
 +    }
++    // Before the background early-return below: switching to a skin with the
++    // SAME background values still changes that skin's advice, so this cannot
++    // live behind the "background changed" test.
++    store.background?.setRecommended(recommendedFor(next.active))
 +    // The background baseline is what THIS follow last applied, never the
 +    // controller's live value: a card edit updates the live value and only
 +    // schedules its own debounced write, so comparing against the stored
@@ -591,7 +625,7 @@
    }
  
    const stopTimer = (): void => {
-@@ -341,10 +413,12 @@
+@@ -341,10 +442,13 @@
    }
  
    void (async () => {
@@ -604,11 +638,12 @@
 +    const seed = await readPersistedActive(store)
 +    applied = seed?.active
 +    appliedBackground = seed?.background
++    store.background?.setRecommended(recommendedFor(seed?.active ?? null))
      if (!stopped) startTimer()
    })()
  
---- baseline/tests/skin-selection-follow.spec.ts	2026-10-01 12:41:45
-+++ patched/tests/skin-selection-follow.spec.ts	2026-10-01 12:41:45
+--- baseline/tests/skin-selection-follow.spec.ts	2026-10-01 12:44:19
++++ patched/tests/skin-selection-follow.spec.ts	2026-10-01 12:44:19
 @@ -7,9 +7,12 @@
   * selection is persisted for the NEXT page load, while the v2 runtime applies
   * in place. A page that keeps running must therefore converge on writes it did
@@ -636,7 +671,7 @@
  
  const API = '/api/skin-center/v2'
  
-@@ -30,20 +35,62 @@
+@@ -30,20 +35,68 @@
    manifest: { id, name: id, nameEn: id, contributes: { stylesheet: 'skin.css' } },
  } as CatalogSkin)
  
@@ -664,10 +699,12 @@
 +function fakeBackground(initial: SkinBackgroundConfig | null = null): {
 +  handle: SkinBackgroundTarget
 +  inits: Array<SkinBackgroundConfig | null>
++  recommended: Array<SkinBackgroundConfig | null>
 +  live: () => Required<SkinBackgroundConfig>
 +  edit: (patch: SkinBackgroundConfig) => void
 +} {
 +  const inits: Array<SkinBackgroundConfig | null> = []
++  const recommended: Array<SkinBackgroundConfig | null> = []
 +  let live = resolveSkinBackground(initial)
 +  return {
 +    handle: {
@@ -675,8 +712,12 @@
 +        inits.push(next)
 +        live = resolveSkinBackground(next)
 +      },
++      // The interface requires this now: the follow pushes the active skin's
++      // tuning.json advice so the controller can merge it per field.
++      setRecommended: (next: SkinBackgroundConfig | null) => { recommended.push(next) },
 +    },
 +    inits,
++    recommended,
 +    live: () => live,
 +    /** A card edit: the live value moves immediately, its debounced POST has not landed. */
 +    edit: (patch: SkinBackgroundConfig) => { live = resolveSkinBackground({ ...live, ...patch }) },
@@ -703,7 +744,7 @@
    store: SkinRuntimeStore
    switched: string[]
    catalogRefreshes: () => number
-@@ -60,6 +107,7 @@
+@@ -60,6 +113,7 @@
      window,
      apiBase: API,
      fetchImpl: options.fetchImpl ?? activeAnswer(() => null),
@@ -711,7 +752,7 @@
      catalog: () => catalog,
      diagnostics: () => [],
      refreshCatalog: async () => { refreshes += 1 },
-@@ -78,6 +126,7 @@
+@@ -78,6 +132,7 @@
  
  afterEach(() => {
    vi.useRealTimers()
@@ -719,7 +760,7 @@
  })
  
  describe('applied-skin convergence (issue #1740)', () => {
-@@ -192,5 +241,150 @@
+@@ -192,5 +247,184 @@
        expect(document.head.querySelector('link[href*="whale-song/stylesheet"]')?.getAttribute('href')).toBe(`${API}/skins/whale-song/stylesheet`)
      })
      store.shutdown()
@@ -774,7 +815,7 @@
 +    expect(background.live().backgroundOpacity).toBe(0)
 +    expect(background.live().bubbleBlur).toBe(10)
 +    stop()
-   })
++  })
 +
 +  it('a hidden page does not converge and catches up when it is visible again', async () => {
 +    vi.useFakeTimers()
@@ -799,7 +840,7 @@
 +    expect(background.inits).toEqual([{ backgroundOpacity: 40 }])
 +    expect(background.live().backgroundOpacity).toBe(40)
 +    stop()
-+  })
+   })
 +
 +  it('an edit still in flight is not reverted by the follow', async () => {
 +    vi.useFakeTimers()
@@ -870,3 +911,37 @@
 +    stop()
 +  })
  })
++
++describe('active skin background recommendation (tuning.json)', () => {
++  // The controller merges the active skin's advice per field, so the follow has
++  // to hand it over whenever the active skin changes — including a switch to a
++  // skin whose background values happen to match, which is why the push cannot
++  // live behind the "background changed" test.
++  it('pushes the new skin advice on a switch, and null for a skin that ships none', async () => {
++    vi.useFakeTimers()
++    let active = 'harbor'
++    const background = fakeBackground(null)
++    const { store } = fakeStore({
++      fetchImpl: activeAnswer(() => active),
++      catalog: [
++        catalogSkin('harbor'),
++        { ...catalogSkin('mint'), tuning: { background: { backgroundOpacity: 45, inputCardBlur: 4 } } },
++      ],
++      background: background.handle,
++    })
++    const stop = watchPersistedSelection(store)
++    await vi.advanceTimersByTimeAsync(0)
++
++    // Then the skin that ships no tuning clears any advice, so the defaults hold
++    expect(background.recommended).toEqual([null])
++
++    // When the selection moves to a skin that does ship advice
++    active = 'mint'
++    await vi.advanceTimersByTimeAsync(2500)
++
++    // Then the controller was handed exactly that advice
++    expect(background.recommended).toContainEqual({ backgroundOpacity: 45, inputCardBlur: 4 })
++    stop()
++  })
++
++})

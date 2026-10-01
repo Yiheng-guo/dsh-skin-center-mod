@@ -1,5 +1,5 @@
---- baseline/tests/background.spec.ts	2026-10-01 12:41:45
-+++ patched/tests/background.spec.ts	2026-10-01 12:41:45
+--- baseline/tests/background.spec.ts	2026-10-01 12:44:19
++++ patched/tests/background.spec.ts	2026-10-01 12:44:19
 @@ -7,6 +7,7 @@
   * client wiring uses.
   */
@@ -125,10 +125,15 @@
      controller.setBlurEmpty(6)
      const element = blurElement()
      expect(element).not.toBeNull()
-@@ -110,6 +178,29 @@
-     controller.dispose()
-   })
- 
+@@ -105,6 +173,29 @@
+     const { controller } = rig({ backgroundBlurEmpty: 2, backgroundBlurContent: 10 })
+     expect(blurElement()!.style.backdropFilter).toContain('blur(2px)')
+     addOfficialConversationRow()
++    await flush()
++    expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
++    controller.dispose()
++  })
++
 +  it('ignores a stale topic-picker row outside the active scrollport (shared selector)', async () => {
 +    const { controller } = rig({ backgroundBlurEmpty: 2, backgroundBlurContent: 10 })
 +    expect(blurElement()!.style.backdropFilter).toContain('blur(2px)')
@@ -147,15 +152,10 @@
 +    scrollport.setAttribute('data-conversation-scroll', '')
 +    document.body.appendChild(scrollport)
 +    scrollport.appendChild(staleRow)
-+    await flush()
-+    expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
-+    controller.dispose()
-+  })
-+
-   it('removes the element when the active value becomes 0, and dispose leaves nothing', () => {
-     const { controller } = rig({ backgroundBlurEmpty: 4 })
-     expect(blurElement()).not.toBeNull()
-@@ -260,3 +351,51 @@
+     await flush()
+     expect(blurElement()!.style.backdropFilter).toContain('blur(10px)')
+     controller.dispose()
+@@ -260,3 +351,98 @@
      controller.dispose()
    })
  })
@@ -203,6 +203,53 @@
 +  it('falls back to the documented defaults for a skin with no recommendation', () => {
 +    const controller = new BackgroundController(null, () => {}, () => null)
 +    expect(controller.inputCardBlur()).toBe(SKIN_BACKGROUND_DEFAULTS.inputCardBlur)
++    expect(controller.opacity()).toBe(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity)
++    controller.dispose()
++  })
++})
++
++describe('BackgroundController.setRecommended', () => {
++  // The push itself is cheap and the follow may call it every tick, so the
++  // no-op has to live here, on the real controller, where "did anything change"
++  // is observable — a stub can only count calls.
++  it('merges the recommendation under the stored values, per field', () => {
++    const controller = new BackgroundController({ inputCardBlur: 0 }, () => {})
++    controller.setRecommended({ inputCardBlur: 9, backgroundOpacity: 45 })
++    expect(controller.inputCardBlur()).toBe(0)
++    expect(controller.opacity()).toBe(45)
++    controller.dispose()
++  })
++
++  it('re-merges the config it already holds when the recommendation changes', () => {
++    const controller = new BackgroundController({ inputCardBlur: 3 }, () => {})
++    controller.setRecommended({ backgroundOpacity: 10 })
++    expect(controller.opacity()).toBe(10)
++    controller.setRecommended({ backgroundOpacity: 80 })
++    expect(controller.opacity()).toBe(80)
++    expect(controller.inputCardBlur()).toBe(3)
++    controller.dispose()
++  })
++
++  it('publishes on a real change and stays silent for an equal one', () => {
++    const controller = new BackgroundController(null, () => {})
++    let published = 0
++    controller.subscribe(() => { published += 1 })
++    controller.setRecommended({ backgroundOpacity: 30 })
++    expect(published).toBe(1)
++    // An equal recommendation, rebuilt as a fresh object: no publish, so the
++    // per-tick push cannot make the card re-render forever.
++    controller.setRecommended({ backgroundOpacity: 30 })
++    expect(published).toBe(1)
++    controller.setRecommended(null)
++    expect(published).toBe(2)
++    controller.dispose()
++  })
++
++  it('clearing the recommendation returns to the documented defaults', () => {
++    const controller = new BackgroundController(null, () => {})
++    controller.setRecommended({ backgroundOpacity: 30 })
++    expect(controller.opacity()).toBe(30)
++    controller.setRecommended(null)
 +    expect(controller.opacity()).toBe(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity)
 +    controller.dispose()
 +  })

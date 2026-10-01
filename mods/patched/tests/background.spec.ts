@@ -399,3 +399,50 @@ describe('BackgroundController skin recommendation', () => {
     controller.dispose()
   })
 })
+
+describe('BackgroundController.setRecommended', () => {
+  // The push itself is cheap and the follow may call it every tick, so the
+  // no-op has to live here, on the real controller, where "did anything change"
+  // is observable — a stub can only count calls.
+  it('merges the recommendation under the stored values, per field', () => {
+    const controller = new BackgroundController({ inputCardBlur: 0 }, () => {})
+    controller.setRecommended({ inputCardBlur: 9, backgroundOpacity: 45 })
+    expect(controller.inputCardBlur()).toBe(0)
+    expect(controller.opacity()).toBe(45)
+    controller.dispose()
+  })
+
+  it('re-merges the config it already holds when the recommendation changes', () => {
+    const controller = new BackgroundController({ inputCardBlur: 3 }, () => {})
+    controller.setRecommended({ backgroundOpacity: 10 })
+    expect(controller.opacity()).toBe(10)
+    controller.setRecommended({ backgroundOpacity: 80 })
+    expect(controller.opacity()).toBe(80)
+    expect(controller.inputCardBlur()).toBe(3)
+    controller.dispose()
+  })
+
+  it('publishes on a real change and stays silent for an equal one', () => {
+    const controller = new BackgroundController(null, () => {})
+    let published = 0
+    controller.subscribe(() => { published += 1 })
+    controller.setRecommended({ backgroundOpacity: 30 })
+    expect(published).toBe(1)
+    // An equal recommendation, rebuilt as a fresh object: no publish, so the
+    // per-tick push cannot make the card re-render forever.
+    controller.setRecommended({ backgroundOpacity: 30 })
+    expect(published).toBe(1)
+    controller.setRecommended(null)
+    expect(published).toBe(2)
+    controller.dispose()
+  })
+
+  it('clearing the recommendation returns to the documented defaults', () => {
+    const controller = new BackgroundController(null, () => {})
+    controller.setRecommended({ backgroundOpacity: 30 })
+    expect(controller.opacity()).toBe(30)
+    controller.setRecommended(null)
+    expect(controller.opacity()).toBe(SKIN_BACKGROUND_DEFAULTS.backgroundOpacity)
+    controller.dispose()
+  })
+})

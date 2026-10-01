@@ -155,7 +155,7 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 | 门禁 | 命令 | 结果 |
 |---|---|---|
 | 类型 | `pnpm typecheck` | **0 错误** |
-| 测试 | `pnpm test` | **691 通过 / 15 失败** |
+| 测试 | `pnpm test` | **696 通过 / 15 失败** |
 | 构建 | `pnpm build` | **成功**，`lib/index.js` + `lib/client.js`，改动标记均在产物中 |
 
 **零回归是跑对照实验得出的**（在完全相同的 `skins/` 状态下）：
@@ -163,7 +163,7 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 | | 测试总数 | 失败 | 通过 |
 |---|---|---|---|
 | 原始上游代码 | 639 | **15** | 624 |
-| 本仓库的补丁 | 706 | **15** | **691** |
+| 本仓库的补丁 | 711 | **15** | **696** |
 
 失败集合完全一致。那 15 个**全部**是 `ENOENT` / `Cannot find module` 指向仓库里的
 **市场皮肤测试夹具**（`matrix` / `maid-atelier` / `orca-link` / `whale-mom` /
@@ -171,7 +171,7 @@ link 且排在更前面 —— 于是每次都删掉预渲染那个、**泄漏�
 `porco-rosso` / `white-snake`）—— 这些皮肤**本来就不在 npm 包里**（`files` 白名单只含
 `skins/blue-fantasy`）。全量 **0 个 AssertionError / TypeError / ReferenceError**。
 
-新增的 67 个测试全部通过，**每一个修复都被单独验证过「有牙」**——把对应的源码改动临时回退，
+新增的 72 个测试全部通过，**每一个修复都被单独验证过「有牙」**——把对应的源码改动临时回退，
 测试立即失败，恢复后再次通过。
 
 **补丁可复现性**：十三个补丁 `patch -p1` 打到原始文件上，34 个文件（其中 3 个是新增文件）与 `mods/patched/` **逐字节一致**。
@@ -290,9 +290,9 @@ while the server pre-renders one with the same href, leaking up to two links int
 `<head>` per switch for the life of the page.
 
 **Verification** — all three upstream gates were run in the upstream tree:
-`pnpm typecheck` 0 errors; `pnpm test` 691 passed / 15 failed with a **controlled
+`pnpm typecheck` 0 errors; `pnpm test` 696 passed / 15 failed with a **controlled
 experiment proving zero regressions** (pristine upstream: 15 failed / 624 passed;
-this fork: 15 failed / 691 passed — same failure set, every remaining failure a
+this fork: 15 failed / 696 passed — same failure set, every remaining failure a
 missing market-skin test fixture that is not part of the npm package);
 `pnpm build` succeeds with the changes present in the bundle. The patches apply
 cleanly to pristine upstream and reproduce `mods/patched/` byte-for-byte across

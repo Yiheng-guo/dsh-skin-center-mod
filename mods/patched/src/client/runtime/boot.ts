@@ -24,6 +24,12 @@ import type { ControllerSkinEntry, SkinController } from './skin-controller.ts'
 export interface CatalogSkin {
   origin: 'builtin' | 'user'
   warnings: string[]
+  /**
+   * The skin's optional tuning.json, already validated by the catalog scan. Only
+   * the background block is read here; the token half is applied by the skin
+   * controller when it activates the skin.
+   */
+  tuning?: { background?: SkinBackgroundConfig }
   manifest: ControllerSkinEntry['manifest'] & {
     name: string
     nameEn: string
@@ -58,6 +64,12 @@ export interface CatalogDiagnostic {
 export interface SkinBackgroundTarget {
   /** Replace the applied config with an externally sourced one; never persists. */
   init(next: SkinBackgroundConfig | null): void
+  /**
+   * Adopt the active skin's recommended values. A no-op when the recommendation
+   * is unchanged, so the follow may push on every tick; the merge is per field,
+   * so a stored user value still wins over the advice.
+   */
+  setRecommended(next: SkinBackgroundConfig | null): void
 }
 
 export interface SkinRuntimeStore {
@@ -381,6 +393,19 @@ export function watchPersistedSelection(
   let timer: number | null = null
   let stopped = false
 
+  /**
+   * The active skin's recommended background values, or null.
+   *
+   * Read from the catalog the store already holds, so this costs a lookup on a
+   * list the page already has. A skin that ships no tuning, or whose tuning
+   * carries no background block, answers null and the defaults hold.
+   */
+  const recommendedFor = (id: string | null): SkinBackgroundConfig | null => {
+    if (id === null) return null
+    const entry = (store.catalog() ?? []).find((skin) => skin.manifest.id === id)
+    return (entry?.tuning?.background as SkinBackgroundConfig | undefined) ?? null
+  }
+
   const tick = async (): Promise<void> => {
     if (stopped) return
     const next = await readPersistedActive(store)
@@ -389,6 +414,10 @@ export function watchPersistedSelection(
       applied = next.active
       await convergeOnSelection(store, next.active)
     }
+    // Before the background early-return below: switching to a skin with the
+    // SAME background values still changes that skin's advice, so this cannot
+    // live behind the "background changed" test.
+    store.background?.setRecommended(recommendedFor(next.active))
     // The background baseline is what THIS follow last applied, never the
     // controller's live value: a card edit updates the live value and only
     // schedules its own debounced write, so comparing against the stored
@@ -419,6 +448,7 @@ export function watchPersistedSelection(
     const seed = await readPersistedActive(store)
     applied = seed?.active
     appliedBackground = seed?.background
+    store.background?.setRecommended(recommendedFor(seed?.active ?? null))
     if (!stopped) startTimer()
   })()
 
