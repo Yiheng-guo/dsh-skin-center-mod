@@ -1,5 +1,5 @@
---- baseline/src/client/runtime/backdrop-scene.ts	2026-10-01 12:44:19
-+++ patched/src/client/runtime/backdrop-scene.ts	2026-10-01 12:44:19
+--- baseline/src/client/runtime/backdrop-scene.ts	2026-10-01 12:46:22
++++ patched/src/client/runtime/backdrop-scene.ts	2026-10-01 12:46:22
 @@ -17,14 +17,15 @@
   * from skin theme tokens, not by this scene layer.
   *
@@ -276,8 +276,8 @@
 -  startFrostFollower(doc)
 +  startFrostFollower(doc, blur)
  }
---- baseline/tests/backdrop-scene.spec.ts	2026-10-01 12:44:19
-+++ patched/tests/backdrop-scene.spec.ts	2026-10-01 12:44:19
+--- baseline/tests/backdrop-scene.spec.ts	2026-10-01 12:46:22
++++ patched/tests/backdrop-scene.spec.ts	2026-10-01 12:46:22
 @@ -8,8 +8,11 @@
  
  import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -460,8 +460,8 @@
 +    controller.dispose()
 +  })
 +})
---- baseline/tests/wallpaper.spec.ts	2026-10-01 12:44:19
-+++ patched/tests/wallpaper.spec.ts	2026-10-01 12:44:19
+--- baseline/tests/wallpaper.spec.ts	2026-10-01 12:46:22
++++ patched/tests/wallpaper.spec.ts	2026-10-01 12:46:22
 @@ -229,8 +229,87 @@
      expect(vid).not.toBeNull()
      expect(vid?.src).toContain('/api/skin-center/we/scene-video/eee')

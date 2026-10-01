@@ -1,5 +1,5 @@
---- /dev/null	2026-10-01 12:44:19
-+++ patched/src/core/tuning.ts	2026-10-01 12:44:19
+--- /dev/null	2026-10-01 12:46:22
++++ patched/src/core/tuning.ts	2026-10-01 12:46:22
 @@ -0,0 +1,151 @@
 +/**
 + * Per-skin tuning sidecar (fork extension).
@@ -152,8 +152,8 @@
 +  if (declarations === '') return null
 +  return `html[data-dsh-skin="${skinId}"]{${declarations}}`
 +}
---- /dev/null	2026-10-01 12:44:19
-+++ patched/tests/tuning.spec.ts	2026-10-01 12:44:19
+--- /dev/null	2026-10-01 12:46:22
++++ patched/tests/tuning.spec.ts	2026-10-01 12:46:22
 @@ -0,0 +1,134 @@
 +/**
 + * Contract tests for the per-skin `tuning.json` sidecar.

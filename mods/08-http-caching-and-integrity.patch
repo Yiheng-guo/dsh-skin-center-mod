@@ -1,5 +1,5 @@
---- baseline/src/routes-v2.ts	2026-10-01 12:44:19
-+++ patched/src/routes-v2.ts	2026-10-01 12:44:19
+--- baseline/src/routes-v2.ts	2026-10-01 12:46:22
++++ patched/src/routes-v2.ts	2026-10-01 12:46:22
 @@ -12,6 +12,10 @@
   *  - GET  /skins/<id>/assets/<path>    static in-directory assets (incl. preview/)
   *  - GET  /active                      the persisted active skin id + background preferences
@@ -439,8 +439,8 @@
      { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/verify`, handler: verifyHandler },
      { kind: 'prefix', path: skinPrefix.replace(/\/$/, ''), handler: skinsHandler },
      { kind: 'exact', path: `${SKIN_CENTER_V2_PREFIX}/active`, handler: (req, res) => {
---- baseline/src/skin-repo.ts	2026-10-01 12:44:19
-+++ patched/src/skin-repo.ts	2026-10-01 12:44:19
+--- baseline/src/skin-repo.ts	2026-10-01 12:46:22
++++ patched/src/skin-repo.ts	2026-10-01 12:46:22
 @@ -33,6 +33,8 @@
  import { validateSkinManifestV2 } from './core/manifest-v2/validate.ts'
  import type { SkinManifestV2 } from './core/manifest-v2/types.ts'
@@ -565,8 +565,8 @@
      claimed.set(manifest.id, entry)
      catalog.skins.push(entry)
    }
---- baseline/tests/routes-v2.spec.ts	2026-10-01 12:44:19
-+++ patched/tests/routes-v2.spec.ts	2026-10-01 12:44:19
+--- baseline/tests/routes-v2.spec.ts	2026-10-01 12:46:22
++++ patched/tests/routes-v2.spec.ts	2026-10-01 12:46:22
 @@ -17,6 +17,7 @@
  
  import { makeSkinCenterV2Routes, SKIN_CENTER_V2_PREFIX } from '../src/routes-v2.ts'
@@ -829,8 +829,8 @@
      expect(readFileSync(join(userDir, 'skin.css'), 'utf8')).toBe(':root { --dsw-alias-bg-base: #fff; }')
      await server.close()
    })
---- baseline/tests/skin-repo.spec.ts	2026-10-01 12:44:19
-+++ patched/tests/skin-repo.spec.ts	2026-10-01 12:44:19
+--- baseline/tests/skin-repo.spec.ts	2026-10-01 12:46:22
++++ patched/tests/skin-repo.spec.ts	2026-10-01 12:46:22
 @@ -112,6 +112,28 @@
      const catalog = loadSkinCatalog({ builtinDir: builtin, userDir: user })
      expect(catalog.skins).toHaveLength(1)

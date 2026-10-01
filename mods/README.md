@@ -1,11 +1,11 @@
 # mods — patches against `@linxin666/dsh-client-ui-skin-center` v0.4.4
 
-Thirteen unified diffs against **pristine upstream source**, with the pristine files
+Fourteen unified diffs against **pristine upstream source**, with the pristine files
 kept alongside so every change is reviewable without cloning upstream.
 
 ```
 baseline/   pristine upstream files, exactly as published
-patched/    the same files with all thirteen patches applied
+patched/    the same files with all fourteen patches applied
 *.patch     diff -u baseline/... patched/...
 ```
 
@@ -26,6 +26,7 @@ patch -p1 < mods/10-skin-tuning-sidecar.patch
 patch -p1 < mods/11-cli-background-and-live-follow.patch
 patch -p1 < mods/12-adapter-diagnostics-counters.patch
 patch -p1 < mods/13-wallpaper-codec-preflight.patch
+patch -p1 < mods/14-we-web-symlink-fence.patch
 ```
 
 `-p1` because the diffs carry the `src/…` / `tests/…` prefix, not a leading
@@ -358,6 +359,40 @@ whole descriptor, exposes the mounted descriptor, and renders a notice.
 every spec that stubbed the handle without it (`getSnapshot is not a function`).
 `tests/skin-center-custom-theme.spec.tsx` is updated in this patch.
 
+## 14-we-web-symlink-fence.patch — `src/we-routes.ts`, `tests/we-routes.spec.ts`
+
+**What the token actually is.** `tokenFor` returns the base64url of the absolute
+path. It is not a secret and never was: the authorization is the `mediaMap` of
+paths the server has issued a token for, and the token is just the key into it.
+
+**The defect the survey called "token bound to a directory".** `GET /web/<token>/<subpath>`
+resolves `subpath` against the project directory and contained it with a LEXICAL
+check: `resolvePath(root, sub)` normalizes `..` as text, and the result is
+compared against `root + sep`. That catches `../../etc/passwd`. It does not catch
+a **symlink**, because a link that lives inside the project directory never leaves
+`root` as text — and `statSync`/`readFileSync` follow it out. A one-line
+`ln -s /etc project/escape` therefore served any readable file on the machine to
+the wallpaper frame, whose origin is `null`.
+
+**The fix, and why the objective's phrasing could not be implemented literally.**
+"The token should be bound to a file rather than a directory" is right for
+`/media/` and `/preview/`, which already map one token to one file. It cannot be
+applied to `/web/`, because a web wallpaper is an HTML project whose CSS, JS and
+assets must all be servable — binding the token to a single file would break the
+feature. The correct property for that route is a directory scope **with a
+real-path fence**, which is what this patch adds: both the project root and the
+requested file are `realpath`'d and the containment check runs on those, so a
+symlink inside the project can no longer lead out while an ordinary nested asset
+still serves. The root is realpath'd too, so a library reached through a symlinked
+manual folder keeps working.
+
+**Verified both ways.** The new test creates a real symlink out of the project and
+asserts `403` plus that the secret is absent from the body, and asserts that the
+sibling `app.js` and the project HTML still serve. Reverting the `realpath` calls
+makes that test fail with **`expected 200 to be 403`** — the escape actually
+served the file, which is the evidence that the hole was real rather than
+theoretical.
+
 ## Verification
 
 Run in an upstream checkout with the patches applied:
@@ -365,7 +400,7 @@ Run in an upstream checkout with the patches applied:
 | Gate | Result |
 |---|---|
 | `pnpm typecheck` | 0 errors |
-| `pnpm test` | 696 passed / 15 failed — **zero regressions**, see below |
+| `pnpm test` | 697 passed / 15 failed — **zero regressions**, see below |
 | `pnpm build` | succeeds; every change marker present in the bundle |
 
 Controlled experiment, both runs in the identical `skins/` state:
@@ -373,7 +408,7 @@ Controlled experiment, both runs in the identical `skins/` state:
 | | tests | failed | passed |
 |---|---|---|---|
 | pristine upstream | 639 | 15 | 624 |
-| these patches | 711 | 15 | **696** |
+| these patches | 712 | 15 | **697** |
 
 Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository's
 **market-skin test fixtures** (`matrix`, `maid-atelier`, `orca-link`, `whale-mom`,
@@ -381,11 +416,11 @@ Same failure set. All 15 are `ENOENT` / `Cannot find module` for the repository'
 `porco-rosso`, `white-snake`) — those skins are not in the npm package (`files`
 whitelists only `skins/blue-fantasy`), so they are absent from a source-only
 checkout. **Zero AssertionError / TypeError / ReferenceError** on both sides of the
-experiment. The 72 added tests all pass (696 − 624), and every fix in this series
+experiment. The 73 added tests all pass (697 − 624), and every fix in this series
 was individually proven to fail when its source change is reverted.
 
 Reproducibility: applying the thirteen patches to the pristine files reproduces
-`patched/` byte-for-byte (34 files, three of them new).
+`patched/` byte-for-byte (36 files, three of them new).
 
 ## Not included
 
@@ -429,16 +464,15 @@ advice. `setRecommended` is a no-op for an equal recommendation, so pushing on
 every tick cannot make the card re-render, and `dsh-skin bg reset` returns to
 the active skin's advice.
 
-**Not attempted, with reasons.** F18's D3 (bind a WE preview token to a file rather than a directory, and
-stop `/web/` following symlinks) is NOT attempted, and the reason an earlier
-revision of this file gave — that the WE paths are Windows-only — is wrong and is
-corrected here. Automatic WE discovery is Windows-only (`we-library.ts` returns
-null/[] when `process.platform !== 'win32'`), but the manual-folder import path
-works on every platform, so these routes are reachable on macOS too. It is left
-undone because it is a security-sensitive change to a nine-hundred-line route
-module and I could not verify it properly in the time available — not because it
-does not matter. Anyone picking this up should treat it as open, not as
-considered-and-declined.
+**Not attempted, with reasons.** F18's D3 is now **done** (patch 14): the `/web/` route's
+containment fence runs on real paths, so a symlink inside a project directory can
+no longer lead out of it. An earlier revision of this file claimed it was skipped
+because the WE paths are Windows-only; that was wrong, and the correction is left
+above rather than deleted, because the reasoning error is more instructive than
+the fix. The one part of the objective's phrasing that could not be implemented
+literally — "token bound to a file rather than a directory" — is explained in
+patch 14's section: it already holds for `/media/` and `/preview/`, and cannot
+hold for `/web/` without breaking web wallpapers.
 F19 (WE texture cache) likewise Windows-only. F11 (lazy observers) is a
 trade-off needing a measurement, not a defect. F21's architectural rewrite is out
 of scope; only its "make anchor rot visible" subset is addressed, by the

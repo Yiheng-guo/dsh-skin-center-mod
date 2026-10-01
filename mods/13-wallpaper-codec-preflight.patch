@@ -1,5 +1,5 @@
---- baseline/src/client/wallpaper.ts	2026-10-01 12:44:19
-+++ patched/src/client/wallpaper.ts	2026-10-01 12:44:19
+--- baseline/src/client/wallpaper.ts	2026-10-01 12:46:22
++++ patched/src/client/wallpaper.ts	2026-10-01 12:46:22
 @@ -48,6 +48,16 @@
    previewUrl: string | null
  }
@@ -226,8 +226,8 @@
          return this.buildVideo(descriptor.videoUrl, descriptor.frameUrl, descriptor.previewUrl)
        }
        if (this.modeValue === 'live' && descriptor.sceneUrl) {
---- baseline/src/client/WallpaperPanel.tsx	2026-10-01 12:44:19
-+++ patched/src/client/WallpaperPanel.tsx	2026-10-01 12:44:19
+--- baseline/src/client/WallpaperPanel.tsx	2026-10-01 12:46:22
++++ patched/src/client/WallpaperPanel.tsx	2026-10-01 12:46:22
 @@ -11,7 +11,7 @@
   */
  import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
@@ -302,8 +302,8 @@
            {activeSelection !== '' && (
              <div className={css.wallpaperControls}>
                <div className={css.themeRow}>
---- baseline/src/client/index.ts	2026-10-01 12:44:19
-+++ patched/src/client/index.ts	2026-10-01 12:44:19
+--- baseline/src/client/index.ts	2026-10-01 12:46:22
++++ patched/src/client/index.ts	2026-10-01 12:46:22
 @@ -296,6 +296,9 @@
    // flip paints immediately.
    const runtime = bootSkinRuntime({
@@ -322,8 +322,8 @@
        trying: () => wallpaper.trying(),
        writeError: () => wallpaper.writeError(),
        subscribe: listener => wallpaper.subscribe(listener),
---- baseline/tests/wallpaper-panel.spec.tsx	2026-10-01 12:44:19
-+++ patched/tests/wallpaper-panel.spec.tsx	2026-10-01 12:44:19
+--- baseline/tests/wallpaper-panel.spec.tsx	2026-10-01 12:46:22
++++ patched/tests/wallpaper-panel.spec.tsx	2026-10-01 12:46:22
 @@ -10,7 +10,7 @@
  import { createRoot, type Root } from 'react-dom/client'
  import { WallpaperPanel } from '../src/client/WallpaperPanel.tsx'
@@ -422,8 +422,8 @@
  describe('WallpaperPanel directory picker', () => {
    it('adds the picked folder directly through the native picker', async () => {
      const added: string[] = []
---- baseline/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:44:19
-+++ patched/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:44:19
+--- baseline/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:46:22
++++ patched/tests/skin-center-custom-theme.spec.tsx	2026-10-01 12:46:22
 @@ -98,6 +98,10 @@
      enabled: () => true, selection: () => options.wallpaperSelection ?? '', mode: () => 'live', fit: () => 'cover', dim: () => 0,
      wallpaperBlur: () => 0, wallpaperOpacity: () => 100, pauseOnHidden: () => false, sound: () => false, volume: () => 100,

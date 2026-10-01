@@ -1,5 +1,5 @@
---- baseline/scripts/dsh-skin.cjs	2026-10-01 12:44:19
-+++ patched/scripts/dsh-skin.cjs	2026-10-01 12:44:19
+--- baseline/scripts/dsh-skin.cjs	2026-10-01 12:46:22
++++ patched/scripts/dsh-skin.cjs	2026-10-01 12:46:22
 @@ -7,8 +7,9 @@
   * Skins are pure asset directories (skin.json + skin.css + optional
   * patches.css / hooks.mjs / assets/). The skin-center package is the only
@@ -267,8 +267,8 @@
      default: return usage(cmd === undefined ? 0 : 1)
    }
  }
---- baseline/scripts/dsh-skin.test.mjs	2026-10-01 12:44:19
-+++ patched/scripts/dsh-skin.test.mjs	2026-10-01 12:44:19
+--- baseline/scripts/dsh-skin.test.mjs	2026-10-01 12:46:22
++++ patched/scripts/dsh-skin.test.mjs	2026-10-01 12:46:22
 @@ -1,6 +1,6 @@
  /**
 - * Tests for scripts/dsh-skin (v2): validate / install / use / list / current
@@ -411,8 +411,8 @@
  test('use rejects an unknown skin', () => {
    const r = run(['use', 'no-such-skin'])
    assert.equal(r.code, 1)
---- baseline/src/client/runtime/boot.ts	2026-10-01 12:44:19
-+++ patched/src/client/runtime/boot.ts	2026-10-01 12:44:19
+--- baseline/src/client/runtime/boot.ts	2026-10-01 12:46:22
++++ patched/src/client/runtime/boot.ts	2026-10-01 12:46:22
 @@ -12,6 +12,7 @@
   * @module @linxin666/dsh-client-ui-skin-center/runtime/boot
   */
@@ -642,8 +642,8 @@
      if (!stopped) startTimer()
    })()
  
---- baseline/tests/skin-selection-follow.spec.ts	2026-10-01 12:44:19
-+++ patched/tests/skin-selection-follow.spec.ts	2026-10-01 12:44:19
+--- baseline/tests/skin-selection-follow.spec.ts	2026-10-01 12:46:22
++++ patched/tests/skin-selection-follow.spec.ts	2026-10-01 12:46:22
 @@ -7,9 +7,12 @@
   * selection is persisted for the NEXT page load, while the v2 runtime applies
   * in place. A page that keeps running must therefore converge on writes it did

@@ -1,5 +1,5 @@
---- baseline/src/index.ts	2026-10-01 12:44:19
-+++ patched/src/index.ts	2026-10-01 12:44:19
+--- baseline/src/index.ts	2026-10-01 12:46:22
++++ patched/src/index.ts	2026-10-01 12:46:22
 @@ -42,7 +42,15 @@
  export type { TokenAuditStylesheet, TokenAuditResult } from './core/css-safety/token-audit.ts'
  export { loadSkinCatalog, findSkin, resolveInsideSkin, userSkinsDir, builtinSkinsDir, canServeSkinHooks } from './skin-repo.ts'

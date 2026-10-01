@@ -1,0 +1,97 @@
+--- baseline/src/we-routes.ts	2026-10-01 12:46:22
++++ patched/src/we-routes.ts	2026-10-01 12:46:22
+@@ -32,7 +32,7 @@
+  * @module @linxin666/dsh-client-ui-skin-center/we-routes
+  */
+ 
+-import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
++import { cpSync, createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
+ import { readFile, stat } from 'node:fs/promises'
+ import type { IncomingMessage, ServerResponse } from 'node:http'
+ import { pipeline, type Readable } from 'node:stream'
+@@ -645,9 +645,28 @@
+         writeJson(res, 403, { ok: false, error: 'path-escape-rejected' })
+         return
+       }
+-      if (!existsSync(abs) || !statSync(abs).isFile()) { writeJson(res, 404, { ok: false, error: 'not-found' }); return }
+-      if (/\.html?$/i.test(abs)) {
+-        const html = readFileSync(abs, 'utf8')
++      // Lexical containment is NOT enough: resolvePath normalizes '..' as text,
++      // so a symlink that lives INSIDE the project directory passes the check
++      // above and then its target is followed by statSync/readFileSync straight
++      // out of the project. Both sides are realpath'd and compared, which also
++      // keeps the legitimate case working: a library reached through a symlinked
++      // manual folder realpaths root and file to the same prefix.
++      let realRoot: string
++      let realAbs: string
++      try {
++        realRoot = realpathSync(root)
++        realAbs = realpathSync(abs)
++      } catch {
++        writeJson(res, 404, { ok: false, error: 'not-found' })
++        return
++      }
++      if (realAbs !== realRoot && !realAbs.startsWith(realRoot + sep)) {
++        writeJson(res, 403, { ok: false, error: 'symlink-escape-rejected' })
++        return
++      }
++      if (!existsSync(realAbs) || !statSync(realAbs).isFile()) { writeJson(res, 404, { ok: false, error: 'not-found' }); return }
++      if (/\.html?$/i.test(realAbs)) {
++        const html = readFileSync(realAbs, 'utf8')
+         const defaultsTag = '<script>window.__dshWeDefaultProps = ' + JSON.stringify(webPropertyDefaults(root)).replace(/</g, '\\u003c') + ';</script>'
+         const tag = defaultsTag + '<script src="' + WE_API_PREFIX + '/shim.js"></script>'
+         const injected = /<head[^>]*>/i.test(html)
+@@ -664,7 +683,7 @@
+         res.end(injected)
+         return
+       }
+-      serveFile(abs, req, res, openReadStream, { 'Access-Control-Allow-Origin': 'null' })
++      serveFile(realAbs, req, res, openReadStream, { 'Access-Control-Allow-Origin': 'null' })
+     },
+   })
+ 
+--- baseline/tests/we-routes.spec.ts	2026-10-01 12:46:22
++++ patched/tests/we-routes.spec.ts	2026-10-01 12:46:22
+@@ -6,7 +6,7 @@
+  * same-origin fence on POST routes.
+  */
+ import { createServer, request as httpRequest, type Server } from 'node:http'
+-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
++import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+ import { tmpdir } from 'node:os'
+ import { dirname, join } from 'node:path'
+ import type { AddressInfo } from 'node:net'
+@@ -496,6 +496,33 @@
+     const res = await call('GET', String(web?.webUrl) + '..%2F..%2F..%2Fetc%2Fpasswd')
+     expect([403, 404]).toContain(res.status)
+   })
++
++  it('refuses a symlink that leads out of the project, while still serving the project', async () => {
++    // A link INSIDE the project directory is invisible to the lexical check:
++    // resolvePath(root, 'escape/secret.txt') never leaves root as TEXT, and only
++    // the real path reveals that it does. The fence has to be on the real path.
++    const inventory = await call('GET', WE_API_PREFIX + '/inventory')
++    const web = (inventory.body.wallpapers as Array<Record<string, unknown>>).find(w => w.id === '222')
++    const base = String(web?.webUrl)
++
++    const outside = mkdtempSync(join(tmpdir(), 'we-outside-'))
++    writeFileSync(join(outside, 'secret.txt'), 'top secret', 'utf8')
++    const projectDir = join(library, '222')
++    symlinkSync(outside, join(projectDir, 'escape'), 'dir')
++
++    // Then the escape is refused and the secret is not in the body
++    const escaped = await call('GET', base + 'escape/secret.txt')
++    expect(escaped.status).toBe(403)
++    expect(escaped.raw ?? '').not.toContain('top secret')
++
++    // And the ordinary files beside it are untouched by the fence
++    const js = await call('GET', base + 'app.js')
++    expect(js.status).toBe(200)
++    expect(js.raw).toBe('console.log(1)')
++    const html = await call('GET', base)
++    expect(html.status).toBe(200)
++    expect(html.raw).toContain('<body>hi</body>')
++  })
+ })
+ 
+ describe('shim', () => {
