@@ -429,10 +429,16 @@ advice. `setRecommended` is a no-op for an equal recommendation, so pushing on
 every tick cannot make the card re-render, and `dsh-skin bg reset` returns to
 the active skin's advice.
 
-**Not attempted, with reasons.** F18's D3 (bind a WE preview token to a file
-rather than a directory, and stop `/web/` following symlinks) — a real security
-gap, but only reachable on the Wallpaper Engine paths, which are Windows-only
-(verified: `we-library.ts` returns null/[] when `process.platform !== 'win32'`).
+**Not attempted, with reasons.** F18's D3 (bind a WE preview token to a file rather than a directory, and
+stop `/web/` following symlinks) is NOT attempted, and the reason an earlier
+revision of this file gave — that the WE paths are Windows-only — is wrong and is
+corrected here. Automatic WE discovery is Windows-only (`we-library.ts` returns
+null/[] when `process.platform !== 'win32'`), but the manual-folder import path
+works on every platform, so these routes are reachable on macOS too. It is left
+undone because it is a security-sensitive change to a nine-hundred-line route
+module and I could not verify it properly in the time available — not because it
+does not matter. Anyone picking this up should treat it as open, not as
+considered-and-declined.
 F19 (WE texture cache) likewise Windows-only. F11 (lazy observers) is a
 trade-off needing a measurement, not a defect. F21's architectural rewrite is out
 of scope; only its "make anchor rot visible" subset is addressed, by the
